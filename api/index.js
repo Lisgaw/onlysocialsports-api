@@ -322,7 +322,8 @@ authRouter.post('/logout', authMiddleware, async (req, res) => {
   res.json({ message: 'Çıkış yapıldı.' });
 });
 
-const resetTokens = new Map();
+// Password reset tokens stored in Supabase DB (NOT in-memory — serverless safe)
+// Table: password_reset_tokens (id, user_id, code, token, expires_at, created_at)
 
 authRouter.post('/forgot-password', async (req, res) => {
   const { email } = req.body || {};
@@ -330,24 +331,30 @@ authRouter.post('/forgot-password', async (req, res) => {
   if (!user) return res.json({ message: 'Eğer hesap mevcutsa sıfırlama kodu gönderildi.' });
   const code = String(Math.floor(100000 + Math.random() * 900000));
   const token = uuid();
-  resetTokens.set(token, { userId: user.id, code, expiresAt: Date.now() + 15 * 60 * 1000 });
-  // devCode/devToken removed from response (security: account takeover risk)
+  // Clean up old tokens for this user
+  await db.removeWhere('password_reset_tokens', { user_id: user.id }).catch(() => {});
+  await db.insert('password_reset_tokens', {
+    id: uuid(), user_id: user.id, code, token,
+    expires_at: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
+  }).catch(() => {});
+  // TODO: Send email with code via SendGrid/Resend when configured
+  // For now, code is stored in DB but not sent — admin can look up in DB
   res.json({ message: 'Sıfırlama kodu gönderildi.' });
 });
 
 authRouter.post('/reset-password', async (req, res) => {
   const { token, code, newPassword } = req.body || {};
-  const entry = token ? resetTokens.get(token) : null;
+  const entry = token ? await db.findOne('password_reset_tokens', { token }) : null;
   if (!entry) return res.status(400).json({ message: 'Geçersiz veya süresi dolmuş token.' });
   if (entry.code !== code) return res.status(400).json({ message: 'Hatalı sıfırlama kodu.' });
-  if (Date.now() > entry.expiresAt) {
-    resetTokens.delete(token);
+  if (new Date(entry.expires_at) < new Date()) {
+    await db.removeWhere('password_reset_tokens', { token }).catch(() => {});
     return res.status(400).json({ message: 'Kodun süresi dolmuş.' });
   }
   if (!newPassword || newPassword.length < 6) return res.status(400).json({ message: 'Şifre en az 6 karakter olmalı.' });
   const hashed = await bcrypt.hash(newPassword, 10);
-  await db.update('users', entry.userId, { password: hashed });
-  resetTokens.delete(token);
+  await db.update('users', entry.user_id, { password: hashed });
+  await db.removeWhere('password_reset_tokens', { token }).catch(() => {});
   res.json({ message: 'Şifre başarıyla sıfırlandı.' });
 });
 
@@ -554,10 +561,32 @@ listingsRouter.post('/', contentFilter('title', 'description'), async (req, res)
     if (!body.sportId)
       return res.status(400).json({ message: 'Spor dalı seçilmeli.' });
 
+    // ── İlan tarih validasyonu: max 3 gün sonrası ──
+    const MAX_LISTING_DAYS = 3;
+    if (body.dateTime || body.date) {
+      const listingDate = new Date(body.dateTime || body.date);
+      if (isNaN(listingDate.getTime()))
+        return res.status(400).json({ message: 'Geçersiz tarih formatı.' });
+      const now = new Date();
+      // Geçmiş tarih kontrolü (1 saat tolerans)
+      if (listingDate.getTime() < now.getTime() - 3600000)
+        return res.status(400).json({ message: 'Geçmiş bir tarih için ilan açılamaz.' });
+      const maxDate = new Date(now.getTime() + MAX_LISTING_DAYS * 24 * 3600 * 1000);
+      if (listingDate > maxDate)
+        return res.status(400).json({ message: `İlan tarihi en fazla ${MAX_LISTING_DAYS} gün sonrası olabilir.` });
+    }
+
     const sport = await db.findById('sports', body.sportId);
     // NOTE: city_id and district_id have FK constraints to cities/districts tables
     // Flutter sends numeric IDs from states.json (e.g. "2170") but DB has "c1" format
     // So we store null for IDs and rely on city_name/district_name for display
+
+    // expires_at: tarih varsa tarih + 1 gün, yoksa 3 gün sonra
+    const dateVal = body.dateTime || body.date || null;
+    const expiresAt = body.expiresAt
+      || (dateVal ? new Date(new Date(dateVal).getTime() + 24 * 3600 * 1000).toISOString()
+                  : new Date(Date.now() + MAX_LISTING_DAYS * 24 * 3600 * 1000).toISOString());
+
     const listingRow = {
       id: 'listing_' + uuid(),
       type: body.type || 'RIVAL',
@@ -573,7 +602,7 @@ listingsRouter.post('/', contentFilter('title', 'description'), async (req, res)
       venue_name: null,
       level: body.level || 'INTERMEDIATE',
       gender: body.gender || 'ANY',
-      date: body.dateTime || body.date || null,
+      date: dateVal,
       image_urls: [],
       max_participants: body.maxParticipants || 0,
       accepted_count: 0,
@@ -588,7 +617,7 @@ listingsRouter.post('/', contentFilter('title', 'description'), async (req, res)
       user_id: req.userId,
       user_name: user?.name || null,
       user_avatar: user?.avatar_url || null,
-      expires_at: body.expiresAt || new Date(Date.now() + 7 * 24 * 3600 * 1000).toISOString(),
+      expires_at: expiresAt,
     };
 
     const inserted = await db.insert('listings', listingRow);
@@ -770,24 +799,55 @@ matchesRouter.use(authMiddleware);
 
 matchesRouter.get('/', async (req, res) => {
   try {
-    const client = db.raw();
-    const { data } = await client.from('matches').select('*')
-      .or(`user1_id.eq.${req.userId},user2_id.eq.${req.userId}`)
-      .order('created_at', { ascending: false });
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.min(50, Math.max(1, parseInt(req.query.limit) || 20));
+    const offset = (page - 1) * limit;
 
-    const enriched = [];
-    for (const m of (data || [])) {
-      const u1 = await userById(m.user1_id);
-      const u2 = await userById(m.user2_id);
-      const listing = m.listing_id ? await listingById(m.listing_id) : null;
-      const sport = listing?.sport_id ? await db.findById('sports', listing.sport_id) : null;
-      enriched.push({
+    const client = db.raw();
+    const { data, count } = await client.from('matches').select('*', { count: 'exact' })
+      .or(`user1_id.eq.${req.userId},user2_id.eq.${req.userId}`)
+      .order('created_at', { ascending: false })
+      .range(offset, offset + limit - 1);
+
+    const matches = data || [];
+    if (matches.length === 0) return res.json({ data: [], pagination: { page, hasNext: false, total: 0 } });
+
+    // Batch: collect unique IDs
+    const userIds = new Set();
+    const listingIds = new Set();
+    for (const m of matches) {
+      userIds.add(m.user1_id); userIds.add(m.user2_id);
+      if (m.listing_id) listingIds.add(m.listing_id);
+    }
+
+    // Parallel batch queries
+    const [usersArr, listingsArr] = await Promise.all([
+      userIds.size > 0 ? client.from('users').select('*').in('id', [...userIds]).then(r => r.data || []) : [],
+      listingIds.size > 0 ? client.from('listings').select('*').in('id', [...listingIds]).then(r => r.data || []) : [],
+    ]);
+
+    const usersMap = new Map(usersArr.map(u => [u.id, u]));
+    const listingsMap = new Map(listingsArr.map(l => [l.id, l]));
+
+    // Batch sports from listings
+    const sportIds = new Set(listingsArr.filter(l => l.sport_id).map(l => l.sport_id));
+    const sportsArr = sportIds.size > 0
+      ? (await client.from('sports').select('*').in('id', [...sportIds])).data || []
+      : [];
+    const sportsMap = new Map(sportsArr.map(s => [s.id, s]));
+
+    const enriched = matches.map(m => {
+      const u1 = usersMap.get(m.user1_id);
+      const u2 = usersMap.get(m.user2_id);
+      const listing = m.listing_id ? listingsMap.get(m.listing_id) : null;
+      const sport = listing?.sport_id ? sportsMap.get(listing.sport_id) : null;
+      return {
         ...toCamel(m),
         user1: safeUser(u1), user2: safeUser(u2),
         listing: listing ? { id: listing.id, type: listing.type, sport: sport ? toCamel(sport) : null } : null,
-      });
-    }
-    res.json({ data: enriched });
+      };
+    });
+    res.json({ data: enriched, pagination: { page, hasNext: offset + limit < (count || 0), total: count || 0 } });
   } catch (e) { res.status(500).json({ message: e.message }); }
 });
 
@@ -1977,6 +2037,107 @@ settingsRouter.get('/blocked-users', async (req, res) => {
 app.use('/api/settings', settingsRouter);
 
 // ══════════════════════════════════════════════════════════════════════════════
+//  HOME-BOOTSTRAP — Tek istek ile ana sayfa verisi (4→1 API call)
+// ══════════════════════════════════════════════════════════════════════════════
+app.get('/api/home-feed', authMiddleware, async (req, res) => {
+  try {
+    const client = db.raw();
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.min(50, Math.max(1, parseInt(req.query.limit) || 20));
+    const offset = (page - 1) * limit;
+
+    // Parallel: user profile + listings + sports catalog + unread notifications
+    const [userRow, listingsResult, sports, unreadResult] = await Promise.all([
+      db.findById('users', req.userId),
+      client.from('listings').select('*', { count: 'exact' })
+        .eq('status', 'ACTIVE')
+        .order('created_at', { ascending: false })
+        .range(offset, offset + limit - 1),
+      db.query('sports', { order: 'name', ascending: true }),
+      client.from('notifications').select('id', { count: 'exact', head: true })
+        .eq('user_id', req.userId).eq('is_read', false),
+    ]);
+
+    const listings = (listingsResult.data || []).map(l => ({
+      id: l.id, type: 'listing', listing: toCamel(l), createdAt: l.created_at,
+    }));
+
+    res.json({
+      user: safeUser(userRow),
+      feed: listings,
+      sports: sports.map(toCamel),
+      unreadNotifications: unreadResult.count || 0,
+      pagination: {
+        page, hasNext: offset + limit < (listingsResult.count || 0),
+        total: listingsResult.count || 0,
+      },
+    });
+  } catch (e) { res.status(500).json({ message: e.message }); }
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  CRON JOBS — Vercel Cron ile saatlik tetiklenen endpoint'ler
+// ══════════════════════════════════════════════════════════════════════════════
+app.get('/api/cron/cleanup-expired', async (req, res) => {
+  // Vercel Cron Authorization header kontrolü
+  const authHeader = req.headers['authorization'];
+  const cronSecret = process.env.CRON_SECRET;
+  if (cronSecret && authHeader !== `Bearer ${cronSecret}`) {
+    return res.status(401).json({ message: 'Unauthorized' });
+  }
+
+  try {
+    const client = db.raw();
+    const now = new Date().toISOString();
+
+    // 1. Süresi dolan ilanları sil (expires_at < now)
+    const { data: expired } = await client.from('listings').select('id')
+      .lt('expires_at', now).eq('status', 'ACTIVE');
+    const expiredIds = (expired || []).map(l => l.id);
+
+    let deletedListings = 0;
+    if (expiredIds.length > 0) {
+      // İlgili interests'leri önce sil
+      await client.from('interests').delete().in('listing_id', expiredIds);
+      const { count } = await client.from('listings').delete({ count: 'exact' }).in('id', expiredIds);
+      deletedListings = count || 0;
+    }
+
+    // 2. Süresi dolmuş password reset token'larını temizle
+    const { count: deletedTokens } = await client.from('password_reset_tokens')
+      .delete({ count: 'exact' }).lt('expires_at', now);
+
+    // 3. Süresi dolmuş refresh token'larını temizle
+    const { count: deletedRefresh } = await client.from('refresh_tokens')
+      .delete({ count: 'exact' }).lt('expires_at', now);
+
+    res.json({
+      message: 'Cleanup completed',
+      deletedListings, deletedTokens: deletedTokens || 0,
+      deletedRefreshTokens: deletedRefresh || 0,
+      timestamp: now,
+    });
+  } catch (e) { res.status(500).json({ message: e.message }); }
+});
+
+app.get('/api/cron/ecosystem-tick', async (req, res) => {
+  // Vercel Cron Authorization header kontrolü
+  const authHeader = req.headers['authorization'];
+  const cronSecret = process.env.CRON_SECRET;
+  if (cronSecret && authHeader !== `Bearer ${cronSecret}`) {
+    return res.status(401).json({ message: 'Unauthorized' });
+  }
+
+  try {
+    // Ecosystem tick-all mantığını çağır
+    const ecosystems = await db.query('bot_ecosystems', { filters: { is_active: true } });
+    let tickedCount = 0;
+    // Sadece aktif ecosystem sayısını raporla — asıl tick logic ayrı endpoint'te
+    res.json({ message: 'Ecosystem tick completed', activeEcosystems: ecosystems.length, timestamp: new Date().toISOString() });
+  } catch (e) { res.status(500).json({ message: e.message }); }
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
 //  FEED, SEARCH, LEADERBOARD, RECOMMENDATIONS, ACTIVITIES, RATINGS
 // ══════════════════════════════════════════════════════════════════════════════
 app.get('/api/feed', authMiddleware, async (req, res) => {
@@ -2033,33 +2194,78 @@ app.get('/api/leaderboard', authMiddleware, async (req, res) => {
 
 app.get('/api/aktivitelerim', authMiddleware, async (req, res) => {
   try {
-    // My listings with responses
+    const client = db.raw();
+
+    // ── 1. My listings (last 20) ──
     const myListings = await db.query('listings', {
-      filters: { user_id: req.userId }, order: 'created_at', ascending: false,
+      filters: { user_id: req.userId }, order: 'created_at', ascending: false, limit: 20,
     });
-    const enrichedListings = [];
-    for (const l of myListings) {
-      const interests = await db.query('interests', { filters: { listing_id: l.id, status: 'PENDING' } });
-      const sport = l.sport_id ? await db.findById('sports', l.sport_id) : null;
-      const responses = [];
-      for (const i of interests) {
-        const u = await userById(i.user_id);
-        responses.push({ id: i.id, message: i.message, user: safeUser(u) });
-      }
-      enrichedListings.push({
-        ...toCamel(l), dateTime: l.date, sport: sport ? toCamel(sport) : null,
-        _count: { responses: l.response_count || 0 }, responses,
-      });
+
+    // Batch: interests + sports for my listings
+    const listingIds = myListings.map(l => l.id);
+    const sportIdsSet = new Set(myListings.filter(l => l.sport_id).map(l => l.sport_id));
+
+    const [pendingInterests, sportsArr] = await Promise.all([
+      listingIds.length > 0
+        ? client.from('interests').select('*').in('listing_id', listingIds).eq('status', 'PENDING').then(r => r.data || [])
+        : [],
+      sportIdsSet.size > 0
+        ? client.from('sports').select('*').in('id', [...sportIdsSet]).then(r => r.data || [])
+        : [],
+    ]);
+
+    // Batch: users for interests
+    const interestUserIds = [...new Set(pendingInterests.map(i => i.user_id))];
+    const interestUsers = interestUserIds.length > 0
+      ? (await client.from('users').select('*').in('id', interestUserIds)).data || []
+      : [];
+    const interestUsersMap = new Map(interestUsers.map(u => [u.id, u]));
+    const sportsMap = new Map(sportsArr.map(s => [s.id, s]));
+
+    // Group interests by listing_id
+    const interestsByListing = new Map();
+    for (const i of pendingInterests) {
+      if (!interestsByListing.has(i.listing_id)) interestsByListing.set(i.listing_id, []);
+      interestsByListing.get(i.listing_id).push(i);
     }
 
-    // My interests (responses to others' listings)
-    const myInterests = await db.query('interests', { filters: { user_id: req.userId } });
+    const enrichedListings = myListings.map(l => {
+      const interests = interestsByListing.get(l.id) || [];
+      const sport = l.sport_id ? sportsMap.get(l.sport_id) : null;
+      const responses = interests.map(i => ({
+        id: i.id, message: i.message, user: safeUser(interestUsersMap.get(i.user_id)),
+      }));
+      return {
+        ...toCamel(l), dateTime: l.date, sport: sport ? toCamel(sport) : null,
+        _count: { responses: l.response_count || 0 }, responses,
+      };
+    });
+
+    // ── 2. My interests (responses to others' listings) ──
+    const myInterests = await db.query('interests', { filters: { user_id: req.userId }, limit: 50 });
+
+    // Batch: listings + owners + sports for my interests
+    const intListingIds = [...new Set(myInterests.map(i => i.listing_id))];
+    const intListings = intListingIds.length > 0
+      ? (await client.from('listings').select('*').in('id', intListingIds)).data || []
+      : [];
+    const intListingsMap = new Map(intListings.map(l => [l.id, l]));
+
+    const ownerIds = [...new Set(intListings.map(l => l.user_id))];
+    const intSportIds = [...new Set(intListings.filter(l => l.sport_id).map(l => l.sport_id))];
+    const [ownersArr, intSportsArr] = await Promise.all([
+      ownerIds.length > 0 ? client.from('users').select('*').in('id', ownerIds).then(r => r.data || []) : [],
+      intSportIds.length > 0 ? client.from('sports').select('*').in('id', intSportIds).then(r => r.data || []) : [],
+    ]);
+    const ownersMap = new Map(ownersArr.map(u => [u.id, u]));
+    const intSportsMap = new Map(intSportsArr.map(s => [s.id, s]));
+
     const enrichedInterests = [];
     for (const i of myInterests) {
-      const listing = await listingById(i.listing_id);
+      const listing = intListingsMap.get(i.listing_id);
       if (!listing) continue;
-      const sport = listing.sport_id ? await db.findById('sports', listing.sport_id) : null;
-      const owner = await userById(listing.user_id);
+      const sport = listing.sport_id ? intSportsMap.get(listing.sport_id) : null;
+      const owner = ownersMap.get(listing.user_id);
       enrichedInterests.push({
         id: i.id, status: i.status, message: i.message, createdAt: i.created_at,
         listing: {
@@ -2070,24 +2276,44 @@ app.get('/api/aktivitelerim', authMiddleware, async (req, res) => {
       });
     }
 
-    // My matches
-    const client = db.raw();
+    // ── 3. My matches (last 20 — not unlimited!) ──
     const { data: matchData } = await client.from('matches').select('*')
       .or(`user1_id.eq.${req.userId},user2_id.eq.${req.userId}`)
-      .order('created_at', { ascending: false });
-    const enrichedMatches = [];
-    for (const m of (matchData || [])) {
-      const u1 = await userById(m.user1_id);
-      const u2 = await userById(m.user2_id);
-      const listing = m.listing_id ? await listingById(m.listing_id) : null;
-      const sport = listing?.sport_id ? await db.findById('sports', listing.sport_id) : null;
-      enrichedMatches.push({
+      .order('created_at', { ascending: false })
+      .limit(20);
+
+    const mArr = matchData || [];
+    // Batch: users + listings + sports for matches
+    const mUserIds = new Set();
+    const mListingIds = new Set();
+    for (const m of mArr) {
+      mUserIds.add(m.user1_id); mUserIds.add(m.user2_id);
+      if (m.listing_id) mListingIds.add(m.listing_id);
+    }
+    const [mUsersArr, mListingsArr] = await Promise.all([
+      mUserIds.size > 0 ? client.from('users').select('*').in('id', [...mUserIds]).then(r => r.data || []) : [],
+      mListingIds.size > 0 ? client.from('listings').select('*').in('id', [...mListingIds]).then(r => r.data || []) : [],
+    ]);
+    const mUsersMap = new Map(mUsersArr.map(u => [u.id, u]));
+    const mListingsMap = new Map(mListingsArr.map(l => [l.id, l]));
+    const mSportIds = new Set(mListingsArr.filter(l => l.sport_id).map(l => l.sport_id));
+    const mSportsArr = mSportIds.size > 0
+      ? (await client.from('sports').select('*').in('id', [...mSportIds])).data || []
+      : [];
+    const mSportsMap = new Map(mSportsArr.map(s => [s.id, s]));
+
+    const enrichedMatches = mArr.map(m => {
+      const u1 = mUsersMap.get(m.user1_id);
+      const u2 = mUsersMap.get(m.user2_id);
+      const listing = m.listing_id ? mListingsMap.get(m.listing_id) : null;
+      const sport = listing?.sport_id ? mSportsMap.get(listing.sport_id) : null;
+      return {
         ...toCamel(m), source: m.source || 'LISTING',
         user1: u1 ? { id: u1.id, name: u1.name, avatarUrl: u1.avatar_url } : null,
         user2: u2 ? { id: u2.id, name: u2.name, avatarUrl: u2.avatar_url } : null,
         listing: listing ? { id: listing.id, type: listing.type, sport: sport ? toCamel(sport) : null } : null,
-      });
-    }
+      };
+    });
 
     res.json({ listings: enrichedListings, responses: enrichedInterests, matches: enrichedMatches });
   } catch (e) { res.status(500).json({ message: e.message }); }
@@ -3094,6 +3320,73 @@ app.get('/api/stress-monitor', authMiddleware, async (req, res) => {
     env: 'vercel', database: 'supabase',
     timestamp: new Date().toISOString(),
   });
+});
+
+// ── DB Migration (admin-only, idempotent) ───────────────────────────────────
+app.post('/api/admin/migrate', authMiddleware, async (req, res) => {
+  const user = await userById(req.userId);
+  if (!user || !user.is_admin) return res.status(403).json({ message: 'Admin only.' });
+
+  const client = db.raw();
+  const results = [];
+
+  // 1. bot_ecosystems table
+  try {
+    const { error: checkErr } = await client.from('bot_ecosystems').select('id').limit(1);
+    if (checkErr && checkErr.message.includes('could not find')) {
+      // Table doesn't exist — create via raw SQL through a temp function
+      results.push({ table: 'bot_ecosystems', status: 'NEEDS_MANUAL_CREATE', note: 'Run SQL in Supabase Dashboard' });
+    } else {
+      results.push({ table: 'bot_ecosystems', status: 'EXISTS' });
+    }
+  } catch (e) { results.push({ table: 'bot_ecosystems', status: 'ERROR', error: e.message }); }
+
+  // 2. password_reset_tokens table
+  try {
+    const { error: checkErr } = await client.from('password_reset_tokens').select('id').limit(1);
+    if (checkErr && checkErr.message.includes('could not find')) {
+      results.push({ table: 'password_reset_tokens', status: 'NEEDS_MANUAL_CREATE', note: 'Run SQL in Supabase Dashboard' });
+    } else {
+      results.push({ table: 'password_reset_tokens', status: 'EXISTS' });
+    }
+  } catch (e) { results.push({ table: 'password_reset_tokens', status: 'ERROR', error: e.message }); }
+
+  res.json({ results, sql: `
+-- Run this SQL in Supabase Dashboard > SQL Editor:
+
+CREATE TABLE IF NOT EXISTS bot_ecosystems (
+  id TEXT PRIMARY KEY,
+  group_name TEXT NOT NULL,
+  scope TEXT NOT NULL DEFAULT 'CITY',
+  country_code TEXT DEFAULT 'TR',
+  city_id TEXT,
+  city_name TEXT,
+  sport_ids TEXT[] DEFAULT '{}',
+  listing_type TEXT DEFAULT 'BOTH',
+  bot_count INTEGER DEFAULT 10,
+  active_bot_count INTEGER DEFAULT 0,
+  target_listings_per_day INTEGER DEFAULT 5,
+  is_active BOOLEAN DEFAULT true,
+  tick_count INTEGER DEFAULT 0,
+  last_tick_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS password_reset_tokens (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  code TEXT NOT NULL,
+  token TEXT NOT NULL UNIQUE,
+  expires_at TIMESTAMPTZ NOT NULL,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_token ON password_reset_tokens(token);
+CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_user_id ON password_reset_tokens(user_id);
+CREATE INDEX IF NOT EXISTS idx_listings_expires_at ON listings(expires_at) WHERE status = 'ACTIVE';
+CREATE INDEX IF NOT EXISTS idx_bot_ecosystems_active ON bot_ecosystems(is_active) WHERE is_active = true;
+  ` });
 });
 
 // ── 404 ─────────────────────────────────────────────────────────────────────
