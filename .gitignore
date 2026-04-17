@@ -1,0 +1,6 @@
+node_modules/
+.env
+.vercel/
+*.log
+store-snapshot.json
+load-test/
