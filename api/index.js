@@ -322,8 +322,6 @@ authRouter.post('/logout', authMiddleware, async (req, res) => {
 });
 
 // Password reset tokens stored in Supabase (not in-memory) for serverless compatibility
-authRouter.post('/forgot-password', async (req, res) => {
-  const { email } = req.body || {};
 // Password reset — email servisi henüz kurulmadığı için devre dışı
 authRouter.post('/forgot-password', async (req, res) => {
   const { email } = req.body || {};
