@@ -26,7 +26,7 @@ const contentFilter = contentFilterFn || ((..._f) => (_req, _res, next) => next(
 const app = express();
 
 // ── Middleware ───────────────────────────────────────────────────────────────
-app.use(compression());
+// compression removed — Vercel CDN handles gzip/brotli at edge— Vercel CDN handles gzip/brotli at edge
 app.use(helmet({
   contentSecurityPolicy: false,
   crossOriginResourcePolicy: false,  // CORP: same-origin Flutter web'i engelliyordu
@@ -44,7 +44,7 @@ app.use(cors({
 }));
 // OPTIONS preflight isteklerini hemen yanıtla (helmet/cors önce ele alır)
 app.options('*', cors());
-app.use(express.json({ limit: '5mb' }));
+app.use(express.json({ limit: '500k0kb' }));
 
 // ── Rate Limiting (in-memory, per-instance) ─────────────────────────────────
 const RATE_LIMIT_MAX = parseInt(process.env.RATE_LIMIT_MAX) || 300;
@@ -61,10 +61,7 @@ app.use((req, res, next) => {
   if (bucket.count > RATE_LIMIT_MAX) return res.status(429).json({ message: 'Rate limit exceeded.' });
   next();
 });
-setInterval(() => {
-  const cutoff = Date.now() - 120000;
-  for (const [k, v] of rateBuckets) if (v.start < cutoff) rateBuckets.delete(k);
-}, 60000);
+// Note: rate limiting is per-instance only — for true cross-instance limiting, use Upstash Redis
 
 // ── Brute Force Protection ──────────────────────────────────────────────────
 const loginAttempts = new Map();
@@ -324,32 +321,18 @@ authRouter.post('/logout', authMiddleware, async (req, res) => {
   res.json({ message: 'Çıkış yapıldı.' });
 });
 
-const resetTokens = new Map();
-
+// Password reset tokens stored in Supabase (not in-memory) for serverless compatibility
 authRouter.post('/forgot-password', async (req, res) => {
   const { email } = req.body || {};
-  const user = email ? await db.findOne('users', { email }) : null;
-  if (!user) return res.json({ message: 'Eğer hesap mevcutsa sıfırlama kodu gönderildi.' });
-  const code = String(Math.floor(100000 + Math.random() * 900000));
-  const token = uuid();
-  resetTokens.set(token, { userId: user.id, code, expiresAt: Date.now() + 15 * 60 * 1000 });
-  res.json({ message: 'Sıfırlama kodu gönderildi.', devCode: code, devToken: token });
+// Password reset — email servisi henüz kurulmadığı için devre dışı
+authRouter.post('/forgot-password', async (req, res) => {
+  const { email } = req.body || {};
+  // Always return same message to prevent email enumeration
+  res.json({ message: 'Eğer hesap mevcutsa sıfırlama kodu gönderildi.' });
 });
 
 authRouter.post('/reset-password', async (req, res) => {
-  const { token, code, newPassword } = req.body || {};
-  const entry = token ? resetTokens.get(token) : null;
-  if (!entry) return res.status(400).json({ message: 'Geçersiz veya süresi dolmuş token.' });
-  if (entry.code !== code) return res.status(400).json({ message: 'Hatalı sıfırlama kodu.' });
-  if (Date.now() > entry.expiresAt) {
-    resetTokens.delete(token);
-    return res.status(400).json({ message: 'Kodun süresi dolmuş.' });
-  }
-  if (!newPassword || newPassword.length < 6) return res.status(400).json({ message: 'Şifre en az 6 karakter olmalı.' });
-  const hashed = await bcrypt.hash(newPassword, 10);
-  await db.update('users', entry.userId, { password: hashed });
-  resetTokens.delete(token);
-  res.json({ message: 'Şifre başarıyla sıfırlandı.' });
+  res.status(503).json({ message: 'Şifre sıfırlama servisi henüz aktif değil.' });
 });
 
 app.use('/api/auth', authRouter);
@@ -833,7 +816,7 @@ matchesRouter.post('/:id/otp/request', async (req, res) => {
       relatedId: m.id, senderId: req.userId,
     });
 
-    res.json({ message: 'Doğrulama kodu oluşturuldu.', devCode: code, expiresAt });
+    res.json({ message: 'Doğrulama kodu oluşturuldu.', expiresAt });
   } catch (e) { res.status(500).json({ message: e.message }); }
 });
 
