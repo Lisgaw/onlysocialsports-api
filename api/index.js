@@ -555,6 +555,9 @@ listingsRouter.post('/', contentFilter('title', 'description'), async (req, res)
       return res.status(400).json({ message: 'Spor dalı seçilmeli.' });
 
     const sport = await db.findById('sports', body.sportId);
+    // NOTE: city_id and district_id have FK constraints to cities/districts tables
+    // Flutter sends numeric IDs from states.json (e.g. "2170") but DB has "c1" format
+    // So we store null for IDs and rely on city_name/district_name for display
     const listingRow = {
       id: 'listing_' + uuid(),
       type: body.type || 'RIVAL',
@@ -562,9 +565,9 @@ listingsRouter.post('/', contentFilter('title', 'description'), async (req, res)
       description: body.description || null,
       sport_id: body.sportId,
       sport_name: sport?.name || null,
-      city_id: body.cityId || null,
+      city_id: null,
       city_name: body.cityName || null,
-      district_id: body.districtId || null,
+      district_id: null,
       district_name: body.districtName || null,
       venue_id: body.venueId || null,
       venue_name: null,
@@ -1512,14 +1515,17 @@ postsRouter.post('/', contentFilter('content', 'title'), async (req, res) => {
     const user = await userById(req.userId);
     const sport = body.sportId ? await db.findById('sports', body.sportId) : null;
 
+    // NOTE: city_id and district_id have FK constraints to cities/districts tables
+    // Flutter sends numeric IDs from states.json but DB has "c1" format → FK violation
+    // Store null for IDs, rely on city_name for display
     const post = await db.insert('posts', {
       id: uuid(), user_id: req.userId, post_type: postType,
       content: body.content.trim(),
       title: postType === 'SOCIAL_LISTING' ? (body.title || '').trim() : null,
       image_url: body.imageUrl || null,
       sport_id: body.sportId || null,
-      city_id: body.cityId || null, city_name: body.cityName || null,
-      district_id: body.districtId || null,
+      city_id: null, city_name: body.cityName || null,
+      district_id: null,
     });
 
     res.status(201).json({
