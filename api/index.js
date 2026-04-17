@@ -2802,6 +2802,198 @@ adminStatsRouter.get('/reports', async (_req, res) => {
   } catch (e) { res.status(500).json({ message: e.message }); }
 });
 
+// ── Admin: PATCH /users/:id (update user) ──
+adminStatsRouter.patch('/users/:id', async (req, res) => {
+  try {
+    const body = sanitize(req.body);
+    const updates = {};
+    if (body.isBanned !== undefined) updates.is_banned = body.isBanned;
+    if (body.isAdmin !== undefined) updates.is_admin = body.isAdmin;
+    if (body.name !== undefined) updates.name = body.name;
+    const updated = await db.update('users', req.params.id, updates);
+    res.json({ data: safeUser(updated) });
+  } catch (e) { res.status(500).json({ message: e.message }); }
+});
+
+// ── Admin: DELETE /users/:id ──
+adminStatsRouter.delete('/users/:id', async (req, res) => {
+  try {
+    await db.remove('users', req.params.id);
+    res.json({ message: 'Kullanıcı silindi.' });
+  } catch (e) { res.status(500).json({ message: e.message }); }
+});
+
+// ── Admin: PATCH /reports/:id (resolve report) ──
+adminStatsRouter.patch('/reports/:id', async (req, res) => {
+  try {
+    const body = sanitize(req.body);
+    const updated = await db.update('reports', req.params.id, {
+      status: body.status || 'RESOLVED',
+      resolved_by: req.userId,
+    });
+    res.json({ data: toCamel(updated) });
+  } catch (e) { res.status(500).json({ message: e.message }); }
+});
+
+// ── Admin: GET /posts (list all posts) ──
+adminStatsRouter.get('/posts', async (req, res) => {
+  try {
+    const { page = 1, limit = 20 } = req.query;
+    const offset = (parseInt(page) - 1) * parseInt(limit);
+    const posts = await db.query('posts', { order: 'created_at', ascending: false, limit: parseInt(limit), offset });
+    const total = await db.count('posts');
+    res.json({ data: posts.map(toCamel), total, page: parseInt(page), limit: parseInt(limit) });
+  } catch (e) { res.status(500).json({ message: e.message }); }
+});
+
+// ── Admin: DELETE /posts/:id ──
+adminStatsRouter.delete('/posts/:id', async (req, res) => {
+  try {
+    await db.remove('posts', req.params.id);
+    res.json({ message: 'Gönderi silindi.' });
+  } catch (e) { res.status(500).json({ message: e.message }); }
+});
+
+// ── Admin: GET /listings (list all listings) ──
+adminStatsRouter.get('/listings', async (req, res) => {
+  try {
+    const { page = 1, limit = 20 } = req.query;
+    const offset = (parseInt(page) - 1) * parseInt(limit);
+    const listings = await db.query('listings', { order: 'created_at', ascending: false, limit: parseInt(limit), offset });
+    const total = await db.count('listings');
+    res.json({ data: listings.map(toCamel), total, page: parseInt(page), limit: parseInt(limit) });
+  } catch (e) { res.status(500).json({ message: e.message }); }
+});
+
+// ── Admin: DELETE /listings/bulk ──
+adminStatsRouter.delete('/listings/bulk', async (req, res) => {
+  try {
+    const body = sanitize(req.body);
+    const ids = body.ids || [];
+    for (const id of ids) await db.remove('listings', id);
+    res.json({ message: `${ids.length} ilan silindi.` });
+  } catch (e) { res.status(500).json({ message: e.message }); }
+});
+
+// ── Admin: Bots CRUD ──
+adminStatsRouter.get('/bots', async (_req, res) => {
+  try {
+    const bots = await db.query('users', { filter: { is_bot: true }, order: 'created_at', ascending: false, limit: 100 });
+    res.json({ data: bots.map(b => safeUser(b)) });
+  } catch (e) { res.status(500).json({ message: e.message }); }
+});
+
+adminStatsRouter.post('/bots', async (req, res) => {
+  try {
+    const body = sanitize(req.body);
+    const bot = await db.insert('users', {
+      id: 'bot_' + uuid(), name: body.name || 'Bot', email: 'bot_' + Date.now() + '@bot.local',
+      password_hash: 'BOT', is_bot: true, is_admin: false, is_banned: false,
+      avatar_url: body.avatarUrl || null, bio: body.bio || null,
+      city_name: body.cityName || null, country_name: body.countryName || null,
+    });
+    res.status(201).json({ data: safeUser(bot) });
+  } catch (e) { res.status(500).json({ message: e.message }); }
+});
+
+adminStatsRouter.patch('/bots/:id', async (req, res) => {
+  try {
+    const body = sanitize(req.body);
+    const updates = {};
+    if (body.name !== undefined) updates.name = body.name;
+    if (body.avatarUrl !== undefined) updates.avatar_url = body.avatarUrl;
+    if (body.bio !== undefined) updates.bio = body.bio;
+    const updated = await db.update('users', req.params.id, updates);
+    res.json({ data: safeUser(updated) });
+  } catch (e) { res.status(500).json({ message: e.message }); }
+});
+
+adminStatsRouter.delete('/bots/:id', async (req, res) => {
+  try {
+    await db.remove('users', req.params.id);
+    res.json({ message: 'Bot silindi.' });
+  } catch (e) { res.status(500).json({ message: e.message }); }
+});
+
+// ── Admin: Countries/Cities/Districts ──
+adminStatsRouter.get('/countries', async (_req, res) => {
+  try {
+    const cities = await db.query('cities', { limit: 100 });
+    // Group by a pseudo-country (Turkey)
+    res.json({ data: [{ id: 'TR', name: 'Türkiye', cities: cities.map(toCamel) }] });
+  } catch (e) { res.status(500).json({ message: e.message }); }
+});
+
+adminStatsRouter.post('/countries/:id/cities', async (req, res) => {
+  try {
+    const body = sanitize(req.body);
+    const city = await db.insert('cities', { id: 'c' + Date.now(), name: body.name });
+    res.status(201).json({ data: toCamel(city) });
+  } catch (e) { res.status(500).json({ message: e.message }); }
+});
+
+adminStatsRouter.post('/countries/:id/cities/:cityId/districts', async (req, res) => {
+  try {
+    const body = sanitize(req.body);
+    const district = await db.insert('districts', { id: 'd' + Date.now(), name: body.name, city_id: req.params.cityId });
+    res.status(201).json({ data: toCamel(district) });
+  } catch (e) { res.status(500).json({ message: e.message }); }
+});
+
+// ── Admin: Bot Tasks ──
+adminStatsRouter.get('/bot-tasks', async (_req, res) => {
+  try {
+    const tasks = await db.query('bot_tasks', { order: 'created_at', ascending: false, limit: 50 }).catch(() => []);
+    res.json({ data: tasks.map(toCamel) });
+  } catch (e) { res.json({ data: [] }); }
+});
+
+adminStatsRouter.post('/bot-tasks/:id/execute', async (req, res) => {
+  try {
+    const updated = await db.update('bot_tasks', req.params.id, { status: 'EXECUTED' }).catch(() => null);
+    res.json({ data: updated ? toCamel(updated) : null, message: 'Görev yürütüldü.' });
+  } catch (e) { res.status(500).json({ message: e.message }); }
+});
+
+adminStatsRouter.delete('/bot-tasks', async (_req, res) => {
+  try {
+    // Bulk delete all completed bot tasks
+    const tasks = await db.query('bot_tasks', { filter: { status: 'EXECUTED' }, limit: 200 }).catch(() => []);
+    for (const t of tasks) await db.remove('bot_tasks', t.id).catch(() => {});
+    res.json({ message: `${tasks.length} görev silindi.` });
+  } catch (e) { res.json({ message: 'Temizlendi.' }); }
+});
+
+// ── Admin: Challenges ──
+adminStatsRouter.get('/challenges', async (_req, res) => {
+  try {
+    const challenges = await db.query('challenges', { order: 'created_at', ascending: false, limit: 50 });
+    res.json({ data: challenges.map(toCamel) });
+  } catch (e) { res.status(500).json({ message: e.message }); }
+});
+
+adminStatsRouter.delete('/challenges/:id', async (req, res) => {
+  try {
+    await db.remove('challenges', req.params.id);
+    res.json({ message: 'Meydan okuma silindi.' });
+  } catch (e) { res.status(500).json({ message: e.message }); }
+});
+
+// ── Admin: Matches ──
+adminStatsRouter.get('/matches', async (_req, res) => {
+  try {
+    const matches = await db.query('matches', { order: 'created_at', ascending: false, limit: 50 });
+    res.json({ data: matches.map(toCamel) });
+  } catch (e) { res.status(500).json({ message: e.message }); }
+});
+
+adminStatsRouter.delete('/matches/:id', async (req, res) => {
+  try {
+    await db.remove('matches', req.params.id);
+    res.json({ message: 'Eşleşme silindi.' });
+  } catch (e) { res.status(500).json({ message: e.message }); }
+});
+
 // Mount Supabase-backed admin routes BEFORE the legacy in-memory admin.js
 app.use('/api/admin', adminStatsRouter);
 
