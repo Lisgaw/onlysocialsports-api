@@ -1488,20 +1488,68 @@ postsRouter.get('/', async (req, res) => {
     q = q.range(skip, skip + ps - 1);
 
     const { data } = await q;
-    const enriched = [];
-    for (const p of (data || [])) {
-      const author = await userById(p.user_id);
-      const commentCount = await db.count('comments', { post_id: p.id });
-      const rd = await enrichPostReactions(p.id, req.userId);
-      const sport = p.sport_id ? await db.findById('sports', p.sport_id) : null;
-      enriched.push({
+    const posts = data || [];
+    if (posts.length === 0) {
+      return res.json({ success: true, data: [], pagination: { page: pg, hasNext: false } });
+    }
+
+    // Batch: collect unique IDs
+    const postIds = posts.map(p => p.id);
+    const userIds = [...new Set(posts.map(p => p.user_id).filter(Boolean))];
+    const sportIds = [...new Set(posts.map(p => p.sport_id).filter(Boolean))];
+
+    // Batch queries in parallel (replaces N+1 per-post queries)
+    const [usersData, sportsData, reactionsData, commentsData] = await Promise.all([
+      // Batch users
+      userIds.length > 0
+        ? client.from('users').select('id,name,avatar_url').in('id', userIds).then(r => r.data || [])
+        : [],
+      // Batch sports
+      sportIds.length > 0
+        ? client.from('sports').select('id,name').in('id', sportIds).then(r => r.data || [])
+        : [],
+      // Batch reactions for all posts
+      client.from('post_reactions').select('post_id,user_id,type').in('post_id', postIds).then(r => r.data || []),
+      // Batch comment counts — get all comments for these posts and count in-memory
+      client.from('comments').select('post_id').in('post_id', postIds).then(r => r.data || []),
+    ]);
+
+    // Build lookup maps
+    const userMap = Object.fromEntries(usersData.map(u => [u.id, u]));
+    const sportMap = Object.fromEntries(sportsData.map(s => [s.id, s]));
+
+    // Group reactions by post_id
+    const reactionsByPost = {};
+    for (const r of reactionsData) {
+      (reactionsByPost[r.post_id] = reactionsByPost[r.post_id] || []).push(r);
+    }
+
+    // Count comments by post_id
+    const commentCountByPost = {};
+    for (const c of commentsData) {
+      commentCountByPost[c.post_id] = (commentCountByPost[c.post_id] || 0) + 1;
+    }
+
+    const enriched = posts.map(p => {
+      const author = userMap[p.user_id];
+      const sport = sportMap[p.sport_id];
+      const reactions = reactionsByPost[p.id] || [];
+      const userReaction = reactions.find(r => r.user_id === req.userId)?.type || null;
+      const reactionCounts = {};
+      REACTION_TYPES.forEach(t => {
+        const cnt = reactions.filter(r => r.type === t).length;
+        if (cnt > 0) reactionCounts[t] = cnt;
+      });
+      return {
         ...toCamel(p),
         user: author ? { id: author.id, name: author.name, avatarUrl: author.avatar_url } : null,
-        commentCount, ...rd,
+        commentCount: commentCountByPost[p.id] || 0,
+        userReaction, reactionCounts, likeCount: reactions.length, isLiked: !!userReaction,
         sportName: sport?.name ?? null,
-      });
-    }
-    res.json({ success: true, data: enriched, pagination: { page: pg, hasNext: (data || []).length >= ps } });
+      };
+    });
+
+    res.json({ success: true, data: enriched, pagination: { page: pg, hasNext: posts.length >= ps } });
   } catch (e) { res.status(500).json({ message: e.message }); }
 });
 
@@ -1553,17 +1601,37 @@ postsRouter.get('/user/:userId', async (req, res) => {
       .order('created_at', { ascending: false })
       .range((pg - 1) * ps, pg * ps - 1);
 
-    const enriched = [];
-    for (const p of (data || [])) {
-      const user = await userById(p.user_id);
-      const commentCount = await db.count('comments', { post_id: p.id });
-      const rd = await enrichPostReactions(p.id, req.userId);
-      enriched.push({
+    const posts = data || [];
+    if (posts.length === 0) {
+      return res.json({ data: [], pagination: { page: pg, pageSize: ps, total: count || 0, hasNext: false } });
+    }
+
+    const postIds = posts.map(p => p.id);
+    const user = await userById(req.params.userId); // Single user — just one query
+
+    const [reactionsData, commentsData] = await Promise.all([
+      client.from('post_reactions').select('post_id,user_id,type').in('post_id', postIds).then(r => r.data || []),
+      client.from('comments').select('post_id').in('post_id', postIds).then(r => r.data || []),
+    ]);
+
+    const reactionsByPost = {};
+    for (const r of reactionsData) (reactionsByPost[r.post_id] = reactionsByPost[r.post_id] || []).push(r);
+    const commentCountByPost = {};
+    for (const c of commentsData) commentCountByPost[c.post_id] = (commentCountByPost[c.post_id] || 0) + 1;
+
+    const enriched = posts.map(p => {
+      const reactions = reactionsByPost[p.id] || [];
+      const userReaction = reactions.find(r => r.user_id === req.userId)?.type || null;
+      const reactionCounts = {};
+      REACTION_TYPES.forEach(t => { const cnt = reactions.filter(r => r.type === t).length; if (cnt > 0) reactionCounts[t] = cnt; });
+      return {
         ...toCamel(p),
         user: user ? { id: user.id, name: user.name, avatarUrl: user.avatar_url } : null,
-        commentCount, ...rd,
-      });
-    }
+        commentCount: commentCountByPost[p.id] || 0,
+        userReaction, reactionCounts, likeCount: reactions.length, isLiked: !!userReaction,
+      };
+    });
+
     res.json({ data: enriched, pagination: { page: pg, pageSize: ps, total: count || 0, hasNext: pg * ps < (count || 0) } });
   } catch (e) { res.status(500).json({ message: e.message }); }
 });
@@ -1679,30 +1747,40 @@ postsRouter.get('/:id/comments', async (req, res) => {
     const postComments = await db.query('comments', {
       filters: { post_id: req.params.id }, order: 'created_at', ascending: true,
     });
+    if (postComments.length === 0) return res.json({ data: [] });
 
-    // Build two-level tree
-    const enriched = [];
-    for (const c of postComments.filter(c => !c.parent_id)) {
-      const author = await userById(c.user_id);
-      const likes = await db.query('comment_likes', { filters: { comment_id: c.id } });
-      const replies = [];
-      for (const r of postComments.filter(x => x.parent_id === c.id)) {
-        const rAuthor = await userById(r.user_id);
-        const rLikes = await db.query('comment_likes', { filters: { comment_id: r.id } });
-        replies.push({
-          ...toCamel(r),
-          user: rAuthor ? { id: rAuthor.id, name: rAuthor.name, avatarUrl: rAuthor.avatar_url } : null,
-          likeCount: rLikes.length, isLiked: rLikes.some(l => l.user_id === req.userId),
-          replies: [],
-        });
-      }
-      enriched.push({
+    // Batch: fetch all users and comment likes in parallel
+    const commentIds = postComments.map(c => c.id);
+    const userIds = [...new Set(postComments.map(c => c.user_id).filter(Boolean))];
+    const client = db.raw();
+
+    const [usersData, likesData] = await Promise.all([
+      userIds.length > 0
+        ? client.from('users').select('id,name,avatar_url').in('id', userIds).then(r => r.data || [])
+        : [],
+      client.from('comment_likes').select('comment_id,user_id').in('comment_id', commentIds).then(r => r.data || []),
+    ]);
+
+    const userMap = Object.fromEntries(usersData.map(u => [u.id, u]));
+    const likesByComment = {};
+    for (const l of likesData) (likesByComment[l.comment_id] = likesByComment[l.comment_id] || []).push(l);
+
+    function enrichComment(c) {
+      const author = userMap[c.user_id];
+      const likes = likesByComment[c.id] || [];
+      return {
         ...toCamel(c),
         user: author ? { id: author.id, name: author.name, avatarUrl: author.avatar_url } : null,
         likeCount: likes.length, isLiked: likes.some(l => l.user_id === req.userId),
-        replies,
-      });
+      };
     }
+
+    // Build two-level tree
+    const enriched = postComments.filter(c => !c.parent_id).map(c => ({
+      ...enrichComment(c),
+      replies: postComments.filter(x => x.parent_id === c.id).map(r => ({ ...enrichComment(r), replies: [] })),
+    }));
+
     res.json({ data: enriched });
   } catch (e) { res.status(500).json({ message: e.message }); }
 });
