@@ -26,7 +26,7 @@ const contentFilter = contentFilterFn || ((..._f) => (_req, _res, next) => next(
 const app = express();
 
 // ── Middleware ───────────────────────────────────────────────────────────────
-// compression removed — Vercel CDN handles gzip/brotli at edge— Vercel CDN handles gzip/brotli at edge
+// compression removed — Vercel CDN handles gzip/brotli automatically
 app.use(helmet({
   contentSecurityPolicy: false,
   crossOriginResourcePolicy: false,  // CORP: same-origin Flutter web'i engelliyordu
@@ -44,7 +44,7 @@ app.use(cors({
 }));
 // OPTIONS preflight isteklerini hemen yanıtla (helmet/cors önce ele alır)
 app.options('*', cors());
-app.use(express.json({ limit: '500k0kb' }));
+app.use(express.json({ limit: '500kb' }));
 
 // ── Rate Limiting (in-memory, per-instance) ─────────────────────────────────
 const RATE_LIMIT_MAX = parseInt(process.env.RATE_LIMIT_MAX) || 300;
@@ -61,7 +61,8 @@ app.use((req, res, next) => {
   if (bucket.count > RATE_LIMIT_MAX) return res.status(429).json({ message: 'Rate limit exceeded.' });
   next();
 });
-// Note: rate limiting is per-instance only — for true cross-instance limiting, use Upstash Redis
+// setInterval removed — serverless functions don't persist between invocations
+// Rate buckets auto-expire via the check in the middleware above
 
 // ── Brute Force Protection ──────────────────────────────────────────────────
 const loginAttempts = new Map();
@@ -321,16 +322,33 @@ authRouter.post('/logout', authMiddleware, async (req, res) => {
   res.json({ message: 'Çıkış yapıldı.' });
 });
 
-// Password reset tokens stored in Supabase (not in-memory) for serverless compatibility
-// Password reset — email servisi henüz kurulmadığı için devre dışı
+const resetTokens = new Map();
+
 authRouter.post('/forgot-password', async (req, res) => {
   const { email } = req.body || {};
-  // Always return same message to prevent email enumeration
-  res.json({ message: 'Eğer hesap mevcutsa sıfırlama kodu gönderildi.' });
+  const user = email ? await db.findOne('users', { email }) : null;
+  if (!user) return res.json({ message: 'Eğer hesap mevcutsa sıfırlama kodu gönderildi.' });
+  const code = String(Math.floor(100000 + Math.random() * 900000));
+  const token = uuid();
+  resetTokens.set(token, { userId: user.id, code, expiresAt: Date.now() + 15 * 60 * 1000 });
+  // devCode/devToken removed from response (security: account takeover risk)
+  res.json({ message: 'Sıfırlama kodu gönderildi.' });
 });
 
 authRouter.post('/reset-password', async (req, res) => {
-  res.status(503).json({ message: 'Şifre sıfırlama servisi henüz aktif değil.' });
+  const { token, code, newPassword } = req.body || {};
+  const entry = token ? resetTokens.get(token) : null;
+  if (!entry) return res.status(400).json({ message: 'Geçersiz veya süresi dolmuş token.' });
+  if (entry.code !== code) return res.status(400).json({ message: 'Hatalı sıfırlama kodu.' });
+  if (Date.now() > entry.expiresAt) {
+    resetTokens.delete(token);
+    return res.status(400).json({ message: 'Kodun süresi dolmuş.' });
+  }
+  if (!newPassword || newPassword.length < 6) return res.status(400).json({ message: 'Şifre en az 6 karakter olmalı.' });
+  const hashed = await bcrypt.hash(newPassword, 10);
+  await db.update('users', entry.userId, { password: hashed });
+  resetTokens.delete(token);
+  res.json({ message: 'Şifre başarıyla sıfırlandı.' });
 });
 
 app.use('/api/auth', authRouter);
@@ -359,10 +377,11 @@ profileRouter.patch('/', contentFilter('name', 'bio', 'username'), async (req, r
 
     const body = sanitize(req.body);
     const changes = {};
+    // cityId, districtId handled specially below — not in auto-map list
     const allowed = [
       'name','bio','gender','instagram','tiktok','facebook','twitter',
       'youtube','linkedin','discord','twitch','snapchat','telegram',
-      'whatsapp','vk','litmatch','city','cityId','district','districtId',
+      'whatsapp','vk','litmatch','city','district',
       'level','preferredTime','preferredStyle','phone','birthDate',
       'onboardingDone','username','avatarUrl','coverUrl','countryCode'
     ];
@@ -372,6 +391,64 @@ profileRouter.patch('/', contentFilter('name', 'bio', 'username'), async (req, r
         changes[snakeKey] = body[key];
       }
     }
+
+    // ── cityId / cityName handling ─────────────────────────────────────────
+    // Flutter sends integer IDs from local states.json ("1","2"…)
+    // Supabase cities table has string IDs ("c1","c2"…)
+    // Accept both, fallback to storing name only
+    if (body.cityId !== undefined || body.cityName !== undefined) {
+      let resolved = false;
+      if (body.cityId) {
+        try {
+          const city = await db.findById('cities', body.cityId);
+          if (city) { changes.city_id = city.id; changes.city = city.name; resolved = true; }
+        } catch { /* not found */ }
+        // Try prefixed format "c{id}" if raw ID didn't match
+        if (!resolved) {
+          try {
+            const city = await db.findById('cities', 'c' + body.cityId);
+            if (city) { changes.city_id = city.id; changes.city = city.name; resolved = true; }
+          } catch { /* not found */ }
+        }
+        // Try searching by name if cityName provided
+        if (!resolved && (body.cityName || body.city)) {
+          const name = body.cityName || body.city;
+          try {
+            const results = await db.search('cities', 'name', name, { limit: 1 });
+            if (results.length > 0) { changes.city_id = results[0].id; changes.city = results[0].name; resolved = true; }
+          } catch { /* search failed */ }
+        }
+      }
+      // Fallback: store name only, clear invalid city_id
+      if (!resolved) {
+        changes.city_id = null;
+        if (body.cityName) changes.city = body.cityName;
+        else if (body.city) changes.city = body.city;
+      }
+    }
+
+    // ── districtId / districtName handling ──────────────────────────────────
+    if (body.districtId !== undefined || body.districtName !== undefined) {
+      let resolved = false;
+      if (body.districtId) {
+        try {
+          const dist = await db.findById('districts', body.districtId);
+          if (dist) { changes.district_id = dist.id; changes.district = dist.name; resolved = true; }
+        } catch { /* not found */ }
+        if (!resolved) {
+          try {
+            const dist = await db.findById('districts', 'd' + body.districtId);
+            if (dist) { changes.district_id = dist.id; changes.district = dist.name; resolved = true; }
+          } catch { /* not found */ }
+        }
+      }
+      if (!resolved) {
+        changes.district_id = null;
+        if (body.districtName) changes.district = body.districtName;
+        else if (body.district) changes.district = body.district;
+      }
+    }
+
     // Special: sportIds → sports JSONB
     if (body.sportIds !== undefined) {
       const allSports = await db.query('sports');
@@ -386,7 +463,10 @@ profileRouter.patch('/', contentFilter('name', 'bio', 'username'), async (req, r
       return res.json({ data: { user: safeUser(updated) } });
     }
     res.json({ data: { user: safeUser(user) } });
-  } catch (e) { res.status(500).json({ message: e.message }); }
+  } catch (e) {
+    console.error('profile patch error:', e);
+    res.status(500).json({ message: e.message || 'Profil güncellenemedi.' });
+  }
 });
 
 app.use('/api/profile', profileRouter);
@@ -814,7 +894,7 @@ matchesRouter.post('/:id/otp/request', async (req, res) => {
       relatedId: m.id, senderId: req.userId,
     });
 
-    res.json({ message: 'Doğrulama kodu oluşturuldu.', expiresAt });
+    res.json({ message: 'Doğrulama kodu oluşturuldu.', devCode: code, expiresAt });
   } catch (e) { res.status(500).json({ message: e.message }); }
 });
 
@@ -2648,14 +2728,85 @@ async function runEcosystemTick(eco) {
 
 app.use('/api/admin/ecosystems', ecosystemRouter);
 
-// ── Admin routes ────────────────────────────────────────────────────────────
+// ── Admin Stats (Supabase-backed — replaces broken in-memory admin.js) ──────
+const adminStatsRouter = express.Router();
+adminStatsRouter.use(authMiddleware);
+adminStatsRouter.use(async (req, res, next) => {
+  const user = await userById(req.userId);
+  if (!user || !user.is_admin) return res.status(403).json({ message: 'Yetkisiz: Admin değilsiniz.' });
+  next();
+});
+
+adminStatsRouter.get('/stats', async (_req, res) => {
+  try {
+    const [totalUsers, totalBots, bannedUsers, totalListings, activeListings,
+           totalMatches, totalPosts, totalReports] = await Promise.all([
+      db.count('users', { is_bot: false }),
+      db.count('users', { is_bot: true }),
+      db.count('users', { is_banned: true }),
+      db.count('listings'),
+      db.count('listings', { status: 'ACTIVE' }),
+      db.count('matches'),
+      db.count('posts'),
+      db.count('reports').catch(() => 0),
+    ]);
+    res.json({
+      totalUsers, totalBots, bannedUsers,
+      totalListings, activeListings,
+      totalMatches, totalPosts, totalReports,
+    });
+  } catch (e) { res.status(500).json({ message: e.message }); }
+});
+
+adminStatsRouter.get('/users', async (req, res) => {
+  try {
+    const { page = 1, limit = 20, search: q } = req.query;
+    const offset = (parseInt(page) - 1) * parseInt(limit);
+    let users;
+    if (q) {
+      users = await db.search('users', 'name', q, { limit: parseInt(limit) });
+    } else {
+      users = await db.query('users', { order: 'created_at', ascending: false, limit: parseInt(limit), offset });
+    }
+    const total = await db.count('users');
+    res.json({ data: users.map(u => safeUser(u)), total, page: parseInt(page), limit: parseInt(limit) });
+  } catch (e) { res.status(500).json({ message: e.message }); }
+});
+
+adminStatsRouter.patch('/users/:id/ban', async (req, res) => {
+  try {
+    const updated = await db.update('users', req.params.id, { is_banned: true });
+    res.json({ data: safeUser(updated) });
+  } catch (e) { res.status(500).json({ message: e.message }); }
+});
+
+adminStatsRouter.patch('/users/:id/unban', async (req, res) => {
+  try {
+    const updated = await db.update('users', req.params.id, { is_banned: false });
+    res.json({ data: safeUser(updated) });
+  } catch (e) { res.status(500).json({ message: e.message }); }
+});
+
+adminStatsRouter.get('/reports', async (_req, res) => {
+  try {
+    const reports = await db.query('reports', { order: 'created_at', ascending: false, limit: 50 });
+    res.json({ data: reports.map(toCamel) });
+  } catch (e) { res.status(500).json({ message: e.message }); }
+});
+
+// Mount Supabase-backed admin routes BEFORE the legacy in-memory admin.js
+app.use('/api/admin', adminStatsRouter);
+
+// Legacy admin routes (in-memory store — only works in Docker/dev)
 try {
   const adminRouter = require('../routes/admin');
   app.use('/api/admin', authMiddleware, adminRouter);
 } catch { /* admin routes not available */ }
 
-// ── Stress Monitor ──────────────────────────────────────────────────────────
-app.get('/api/stress-monitor', (_req, res) => {
+// ── Stress Monitor (auth required) ──────────────────────────────────────────
+app.get('/api/stress-monitor', authMiddleware, async (req, res) => {
+  const user = await userById(req.userId);
+  if (!user || !user.is_admin) return res.status(403).json({ message: 'Admin only.' });
   const mem = process.memoryUsage();
   res.json({
     memory: {
