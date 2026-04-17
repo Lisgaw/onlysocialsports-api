@@ -28,11 +28,7 @@
   "crons": [
     {
       "path": "/api/cron/cleanup-expired",
-      "schedule": "0 * * * *"
-    },
-    {
-      "path": "/api/cron/ecosystem-tick",
-      "schedule": "30 */2 * * *"
+      "schedule": "0 3 * * *"
     }
   ]
 }
