@@ -1517,16 +1517,18 @@ postsRouter.post('/', contentFilter('content', 'title'), async (req, res) => {
       content: body.content.trim(),
       title: postType === 'SOCIAL_LISTING' ? (body.title || '').trim() : null,
       image_url: body.imageUrl || null,
-      sport_id: body.sportId || null, sport_name: sport?.name || null,
-      country_name: body.countryName || null,
+      sport_id: body.sportId || null,
       city_id: body.cityId || null, city_name: body.cityName || null,
-      district_id: body.districtId || null, district_name: body.districtName || null,
-      updated_at: new Date().toISOString(),
+      district_id: body.districtId || null,
     });
 
     res.status(201).json({
       data: {
         ...toCamel(post),
+        sportName: sport?.name || null,
+        countryName: body.countryName || null,
+        districtName: body.districtName || null,
+        updatedAt: post.created_at || new Date().toISOString(),
         user: user ? { id: user.id, name: user.name, avatarUrl: user.avatar_url } : null,
         likeCount: 0, commentCount: 0, isLiked: false,
         userReaction: null, reactionCounts: {},
