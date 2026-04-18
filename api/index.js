@@ -2448,7 +2448,14 @@ ecosystemRouter.use(async (req, res, next) => {
  */
 ecosystemRouter.get('/', async (req, res) => {
   try {
-    const ecosystems = await db.query('bot_ecosystems', { order: 'created_at', ascending: false });
+    await ensureBotEcosystemsTable();
+    let ecosystems;
+    try {
+      ecosystems = await db.query('bot_ecosystems', { order: 'created_at', ascending: false });
+    } catch (tableErr) {
+      // If table doesn't exist yet, return empty list with setup_required flag
+      return res.json({ data: [], setup_required: true, message: tableErr.message });
+    }
     const result = [];
     for (const eco of ecosystems) {
       const botCount = await db.count('users', { is_bot: true, city_id: eco.city_id || undefined });
@@ -2481,6 +2488,7 @@ ecosystemRouter.get('/', async (req, res) => {
 ecosystemRouter.post('/', async (req, res) => {
   try {
     if (!botAutomation) return res.status(500).json({ message: 'Bot automation module not available.' });
+    await ensureBotEcosystemsTable();
 
     const {
       scope = 'CITY',
@@ -3052,7 +3060,7 @@ adminStatsRouter.use(async (req, res, next) => {
 adminStatsRouter.get('/stats', async (_req, res) => {
   try {
     const [totalUsers, totalBots, bannedUsers, totalListings, activeListings,
-           totalMatches, totalPosts, totalReports] = await Promise.all([
+           totalMatches, totalPosts, totalReports, totalBotTasks, activeEcosystems] = await Promise.all([
       db.count('users', { is_bot: false }),
       db.count('users', { is_bot: true }),
       db.count('users', { is_banned: true }),
@@ -3061,11 +3069,15 @@ adminStatsRouter.get('/stats', async (_req, res) => {
       db.count('matches'),
       db.count('posts'),
       db.count('reports').catch(() => 0),
+      db.raw().from('bot_tasks').select('id', { count: 'exact', head: true }).then(r => r.count || 0).catch(() => 0),
+      db.raw().from('bot_ecosystems').select('id', { count: 'exact', head: true }).eq('status', 'ACTIVE').then(r => r.count || 0).catch(() => 0),
     ]);
     res.json({
       totalUsers, totalBots, bannedUsers,
       totalListings, activeListings,
       totalMatches, totalPosts, totalReports,
+      botTasks: totalBotTasks,
+      countries: { active: activeEcosystems },
     });
   } catch (e) { res.status(500).json({ message: e.message }); }
 });
@@ -3182,10 +3194,17 @@ adminStatsRouter.delete('/listings/bulk', async (req, res) => {
 });
 
 // â”€â”€ Admin: Bots CRUD â”€â”€
-adminStatsRouter.get('/bots', async (_req, res) => {
+adminStatsRouter.get('/bots', async (req, res) => {
   try {
-    const bots = await db.query('users', { filter: { is_bot: true }, order: 'created_at', ascending: false, limit: 100 });
-    res.json({ data: bots.map(b => safeUser(b)) });
+    const { page = 1, limit = 20, search: q } = req.query;
+    const offset = (parseInt(page) - 1) * parseInt(limit);
+    const client = db.raw();
+    let qb = client.from('users').select('*').eq('is_bot', true).order('created_at', { ascending: false });
+    if (q) qb = qb.or(`name.ilike.%${q}%,email.ilike.%${q}%`);
+    const { data, error } = await qb.range(offset, offset + parseInt(limit) - 1);
+    if (error) throw error;
+    const { count: totalCount } = await client.from('users').select('id', { count: 'exact', head: true }).eq('is_bot', true);
+    res.json({ data: (data || []).map(b => safeUser(b)), total: totalCount || 0, page: parseInt(page), limit: parseInt(limit) });
   } catch (e) { res.status(500).json({ message: e.message }); }
 });
 
@@ -3358,22 +3377,25 @@ app.post('/api/admin/migrate', authMiddleware, async (req, res) => {
 
 CREATE TABLE IF NOT EXISTS bot_ecosystems (
   id TEXT PRIMARY KEY,
-  group_name TEXT NOT NULL,
   scope TEXT NOT NULL DEFAULT 'CITY',
-  country_code TEXT DEFAULT 'TR',
+  country_code TEXT,
   city_id TEXT,
   city_name TEXT,
   sport_ids TEXT[] DEFAULT '{}',
-  listing_type TEXT DEFAULT 'BOTH',
-  bot_count INTEGER DEFAULT 10,
-  active_bot_count INTEGER DEFAULT 0,
-  target_listings_per_day INTEGER DEFAULT 5,
-  is_active BOOLEAN DEFAULT true,
-  tick_count INTEGER DEFAULT 0,
+  listing_type TEXT DEFAULT 'PARTNER',
+  bots_per_city INTEGER DEFAULT 6,
+  max_participants INTEGER DEFAULT 4,
+  hourly_applications INTEGER DEFAULT 2,
+  status TEXT DEFAULT 'ACTIVE',
+  total_bots INTEGER DEFAULT 0,
+  total_listings INTEGER DEFAULT 0,
+  total_matches INTEGER DEFAULT 0,
   last_tick_at TIMESTAMPTZ,
-  created_at TIMESTAMPTZ DEFAULT NOW(),
-  updated_at TIMESTAMPTZ DEFAULT NOW()
+  created_at TIMESTAMPTZ DEFAULT NOW()
 );
+
+CREATE INDEX IF NOT EXISTS idx_bot_ecosystems_city_id ON bot_ecosystems(city_id);
+CREATE INDEX IF NOT EXISTS idx_bot_ecosystems_status ON bot_ecosystems(status);
 
 CREATE TABLE IF NOT EXISTS password_reset_tokens (
   id TEXT PRIMARY KEY,
