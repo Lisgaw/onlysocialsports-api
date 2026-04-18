@@ -2504,7 +2504,14 @@ ecosystemRouter.use(async (req, res, next) => {
  */
 ecosystemRouter.get('/', async (req, res) => {
   try {
-    await ensureBotEcosystemsTable();
+    try {
+      await ensureBotEcosystemsTable();
+    } catch (setupErr) {
+      if (setupErr.setupRequired) {
+        return res.json({ data: [], setup_required: true, message: 'bot_ecosystems tablosu eksik. Supabase Dashboard > SQL Editor\'de SQL\'i çalıştırın.' });
+      }
+      throw setupErr;
+    }
     let ecosystems;
     try {
       ecosystems = await db.query('bot_ecosystems', { order: 'created_at', ascending: false });
@@ -2544,7 +2551,14 @@ ecosystemRouter.get('/', async (req, res) => {
 ecosystemRouter.post('/', async (req, res) => {
   try {
     if (!botAutomation) return res.status(500).json({ message: 'Bot automation module not available.' });
-    await ensureBotEcosystemsTable();
+    try {
+      await ensureBotEcosystemsTable();
+    } catch (setupErr) {
+      if (setupErr.setupRequired) {
+        return res.status(503).json({ setup_required: true, message: 'bot_ecosystems tablosu eksik. Önce tabloyu oluşturun.' });
+      }
+      throw setupErr;
+    }
 
     const {
       scope = 'CITY',
