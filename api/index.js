@@ -187,43 +187,6 @@ async function enrichPostReactions(postId, currentUserId) {
 app.get('/health', (_req, res) => res.json({
   status: 'ok', env: 'vercel', database: 'supabase', timestamp: new Date().toISOString()
 }));
-
-// TEMPORARY: DB connection test & migration endpoint
-app.get('/db-test', async (_req, res) => {
-  const dbUrl = process.env.SUPABASE_DB_URL || process.env.DATABASE_URL;
-  if (!dbUrl) return res.json({ error: 'No SUPABASE_DB_URL env var', hasSupabaseUrl: !!process.env.SUPABASE_URL });
-  try {
-    const { Client } = require('pg');
-    const client = new Client({ connectionString: dbUrl, ssl: { rejectUnauthorized: false }, connectionTimeoutMillis: 8000 });
-    await client.connect();
-    // Create bot_ecosystems table
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS bot_ecosystems (
-        id TEXT PRIMARY KEY, scope TEXT NOT NULL DEFAULT 'CITY', country_code TEXT, city_id TEXT, city_name TEXT,
-        sport_ids TEXT[] DEFAULT '{}', listing_type TEXT DEFAULT 'PARTNER', bots_per_city INTEGER DEFAULT 6,
-        max_participants INTEGER DEFAULT 4, hourly_applications INTEGER DEFAULT 2, status TEXT DEFAULT 'ACTIVE',
-        total_bots INTEGER DEFAULT 0, total_listings INTEGER DEFAULT 0, total_matches INTEGER DEFAULT 0,
-        last_tick_at TIMESTAMPTZ, created_at TIMESTAMPTZ DEFAULT NOW()
-      );
-      CREATE INDEX IF NOT EXISTS idx_bot_ecosystems_city_id ON bot_ecosystems(city_id);
-      CREATE INDEX IF NOT EXISTS idx_bot_ecosystems_status ON bot_ecosystems(status);
-    `);
-    // Create password_reset_tokens table
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS password_reset_tokens (
-        id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        token TEXT NOT NULL, expires_at TIMESTAMPTZ NOT NULL, used BOOLEAN DEFAULT false,
-        created_at TIMESTAMPTZ DEFAULT NOW()
-      );
-      CREATE INDEX IF NOT EXISTS idx_prt_user_id ON password_reset_tokens(user_id);
-      CREATE INDEX IF NOT EXISTS idx_prt_token ON password_reset_tokens(token);
-    `);
-    await client.end();
-    res.json({ success: true, message: 'Tables created: bot_ecosystems, password_reset_tokens' });
-  } catch (e) {
-    res.json({ error: e.message, code: e.code, dbUrlPrefix: dbUrl.substring(0, 30) + '...' });
-  }
-});
 app.get('/', (_req, res) => res.json({
   name: 'Sports Partner API', version: '2.0.0', status: 'running', database: 'supabase'
 }));
