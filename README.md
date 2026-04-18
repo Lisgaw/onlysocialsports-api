@@ -41,3 +41,5 @@ git push -u origin main
 
 Yeni Supabase projesinde SQL Editor'e git ve çalıştır:
 - `backend/db/migrations/001_initial_schema.sql`
+
+
