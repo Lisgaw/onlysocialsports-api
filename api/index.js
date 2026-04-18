@@ -2433,6 +2433,62 @@ const botAutomation = (() => {
   catch { return null; }
 })();
 
+
+// ── Auto-create bot_ecosystems table if missing ──────────────────────────────
+let _botEcosystemsTableChecked = false;
+async function ensureBotEcosystemsTable() {
+  if (_botEcosystemsTableChecked) return;
+  try {
+    const { error } = await db.raw().from('bot_ecosystems').select('id').limit(1);
+    if (!error) { _botEcosystemsTableChecked = true; return; }
+
+    if (error.message && (error.message.toLowerCase().includes('bot_ecosystems') || error.message.toLowerCase().includes('does not exist'))) {
+      // Table missing – try to create via pg direct connection
+      const dbUrl = process.env.SUPABASE_DB_URL || process.env.DATABASE_URL;
+      if (dbUrl) {
+        const { Client } = require('pg');
+        const client = new Client({ connectionString: dbUrl, ssl: { rejectUnauthorized: false } });
+        await client.connect();
+        await client.query(`
+          CREATE TABLE IF NOT EXISTS bot_ecosystems (
+            id TEXT PRIMARY KEY,
+            scope TEXT NOT NULL DEFAULT 'CITY',
+            country_code TEXT,
+            city_id TEXT,
+            city_name TEXT,
+            sport_ids TEXT[] DEFAULT '{}',
+            listing_type TEXT DEFAULT 'PARTNER',
+            bots_per_city INTEGER DEFAULT 6,
+            max_participants INTEGER DEFAULT 4,
+            hourly_applications INTEGER DEFAULT 2,
+            status TEXT DEFAULT 'ACTIVE',
+            total_bots INTEGER DEFAULT 0,
+            total_listings INTEGER DEFAULT 0,
+            total_matches INTEGER DEFAULT 0,
+            last_tick_at TIMESTAMPTZ,
+            created_at TIMESTAMPTZ DEFAULT NOW()
+          );
+          CREATE INDEX IF NOT EXISTS idx_bot_ecosystems_city_id ON bot_ecosystems(city_id);
+          CREATE INDEX IF NOT EXISTS idx_bot_ecosystems_status ON bot_ecosystems(status);
+        `);
+        await client.end();
+        _botEcosystemsTableChecked = true;
+        console.log('✅ bot_ecosystems table created automatically');
+        return;
+      }
+      // No DB URL – throw informative error so Flutter shows SQL
+      _botEcosystemsTableChecked = true; // Don't retry
+      throw Object.assign(new Error('SETUP_REQUIRED'), { setupRequired: true });
+    } else {
+      throw error;
+    }
+  } catch (e) {
+    if (e.setupRequired) throw e;
+    console.error('ensureBotEcosystemsTable:', e.message);
+    _botEcosystemsTableChecked = true;
+  }
+}
+
 const ecosystemRouter = express.Router();
 ecosystemRouter.use(authMiddleware);
 
