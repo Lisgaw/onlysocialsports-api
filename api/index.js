@@ -1435,6 +1435,35 @@ followsRouter.patch('/:id', async (req, res) => {
   } catch (e) { res.status(500).json({ message: e.message }); }
 });
 
+// Respond to follow request by follower user ID (used from notification inline action)
+followsRouter.post('/respond-by-user', async (req, res) => {
+  try {
+    const { followerId, action } = req.body;
+    if (!followerId) return res.status(400).json({ message: 'followerId gerekli.' });
+    const pending = await db.query('follows', { filters: { follower_id: followerId, following_id: req.userId, status: 'pending' } });
+    if (!pending.length) return res.status(404).json({ message: 'Bekleyen istek bulunamadı.' });
+    const follow = pending[0];
+    if (action === 'ACCEPTED') {
+      await db.update('follows', follow.id, { status: 'accepted' });
+      const target = await userById(req.userId);
+      const follower = await userById(followerId);
+      if (target) await db.update('users', target.id, { follower_count: (target.follower_count || 0) + 1 });
+      if (follower) await db.update('users', follower.id, { following_count: (follower.following_count || 0) + 1 });
+      await pushNotification({
+        userId: followerId, type: 'FOLLOW_ACCEPTED',
+        title: 'Takip isteğin kabul edildi',
+        body: `${target?.name || 'Birisi'} takip isteğini kabul etti.`,
+        relatedId: req.userId, senderId: req.userId,
+        senderName: target?.name, senderAvatar: target?.avatar_url,
+      });
+      res.json({ message: 'İstek kabul edildi.' });
+    } else {
+      await db.remove('follows', follow.id);
+      res.json({ message: 'İstek reddedildi.' });
+    }
+  } catch (e) { res.status(500).json({ message: e.message }); }
+});
+
 app.use('/api/follows', followsRouter);
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -1614,7 +1643,7 @@ postsRouter.use(authMiddleware);
 
 postsRouter.get('/', async (req, res) => {
   try {
-    const { page = 1, pageSize = 20, postType, cityId, cityName } = req.query;
+    const { page = 1, pageSize = 20, postType, cityId, cityName, countryCode } = req.query;
     const pg = Number(page);
     const ps = Math.min(50, Number(pageSize));
     const skip = (pg - 1) * ps;
@@ -1624,6 +1653,7 @@ postsRouter.get('/', async (req, res) => {
     if (postType) q = q.eq('post_type', postType);
     if (cityId) q = q.eq('city_id', cityId);
     if (cityName) q = q.ilike('city_name', `%${cityName}%`);
+    if (countryCode) q = q.eq('country_code', countryCode);
     q = q.range(skip, skip + ps - 1);
 
     const { data } = await q;
@@ -3234,8 +3264,21 @@ adminStatsRouter.delete('/users/:id', async (req, res) => {
 adminStatsRouter.patch('/reports/:id', async (req, res) => {
   try {
     const body = sanitize(req.body);
+    const action = (body.action || body.status || 'RESOLVED').toUpperCase();
+    const report = await db.findById('reports', req.params.id);
+    if (!report) return res.status(404).json({ message: 'Rapor bulunamadı.' });
+
+    // Ban user if action is BAN
+    if (action === 'BAN' && report.target_id) {
+      await db.update('users', report.target_id, { is_banned: true, banned_at: new Date().toISOString(), banned_by: req.userId });
+    }
+    // Unban user if action is UNBAN
+    if (action === 'UNBAN' && report.target_id) {
+      await db.update('users', report.target_id, { is_banned: false, banned_at: null, banned_by: null });
+    }
+
     const updated = await db.update('reports', req.params.id, {
-      status: body.status || 'RESOLVED',
+      status: action === 'BAN' ? 'RESOLVED_BAN' : action === 'UNBAN' ? 'RESOLVED_UNBAN' : 'RESOLVED',
       resolved_by: req.userId,
     });
     res.json({ data: toCamel(updated) });
@@ -3279,6 +3322,14 @@ adminStatsRouter.delete('/listings/bulk', async (req, res) => {
     const ids = body.ids || [];
     for (const id of ids) await db.remove('listings', id);
     res.json({ message: `${ids.length} ilan silindi.` });
+  } catch (e) { res.status(500).json({ message: e.message }); }
+});
+
+// ── Admin: DELETE /listings/:id (individual listing delete) ──
+adminStatsRouter.delete('/listings/:id', async (req, res) => {
+  try {
+    await db.remove('listings', req.params.id);
+    res.json({ message: 'İlan silindi.' });
   } catch (e) { res.status(500).json({ message: e.message }); }
 });
 
