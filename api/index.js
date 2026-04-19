@@ -400,6 +400,19 @@ profileRouter.patch('/', contentFilter('name', 'bio', 'username'), async (req, r
     if (!user) return res.status(404).json({ message: 'Kullanıcı bulunamadı.' });
 
     const body = sanitize(req.body);
+
+    // ── Block inappropriate social media links ──
+    const socialFields = ['instagram','tiktok','facebook','twitter','youtube','linkedin','discord','twitch','snapchat','telegram','whatsapp','vk','litmatch'];
+    const blockedDomains = ['pornhub','xvideos','xhamster','xnxx','redtube','youporn','brazzers','onlyfans','chaturbate','livejasmin','stripchat','cam4','bongacams','myfreecams','fansly','manyvids'];
+    for (const f of socialFields) {
+      if (body[f] && typeof body[f] === 'string') {
+        const lower = body[f].toLowerCase();
+        if (blockedDomains.some(d => lower.includes(d))) {
+          return res.status(400).json({ message: 'Uygunsuz içerik bağlantısı eklenemez.' });
+        }
+      }
+    }
+
     const changes = {};
     // cityId, districtId handled specially below — not in auto-map list
     const allowed = [
@@ -420,28 +433,14 @@ profileRouter.patch('/', contentFilter('name', 'bio', 'username'), async (req, r
     // Flutter sends integer IDs from local states.json ("1","2"…)
     // Supabase cities table has string IDs ("c1","c2"…)
     // Accept both, fallback to storing name only
+    // IMPORTANT: Always store the original cityId so Flutter can restore geo selection
     if (body.cityId !== undefined || body.cityName !== undefined) {
       let resolved = false;
       if (body.cityId) {
-        try {
-          const city = await db.findById('cities', body.cityId);
-          if (city) { changes.city_id = city.id; changes.city = city.name; resolved = true; }
-        } catch { /* not found */ }
-        // Try prefixed format "c{id}" if raw ID didn't match
-        if (!resolved) {
-          try {
-            const city = await db.findById('cities', 'c' + body.cityId);
-            if (city) { changes.city_id = city.id; changes.city = city.name; resolved = true; }
-          } catch { /* not found */ }
-        }
-        // Try searching by name if cityName provided
-        if (!resolved && (body.cityName || body.city)) {
-          const name = body.cityName || body.city;
-          try {
-            const results = await db.search('cities', 'name', name, { limit: 1 });
-            if (results.length > 0) { changes.city_id = results[0].id; changes.city = results[0].name; resolved = true; }
-          } catch { /* search failed */ }
-        }
+        // Store the original cityId so Flutter can restore state from states.json
+        changes.city_id = body.cityId;
+        changes.city = body.cityName || body.city || null;
+        resolved = true;
       }
       // Fallback: store name only, clear invalid city_id
       if (!resolved) {
@@ -449,6 +448,11 @@ profileRouter.patch('/', contentFilter('name', 'bio', 'username'), async (req, r
         if (body.cityName) changes.city = body.cityName;
         else if (body.city) changes.city = body.city;
       }
+    }
+
+    // Store country_code
+    if (body.countryCode !== undefined) {
+      changes.country_code = body.countryCode;
     }
 
     // ── districtId / districtName handling ──────────────────────────────────
@@ -495,9 +499,57 @@ profileRouter.patch('/', contentFilter('name', 'bio', 'username'), async (req, r
 
 app.use('/api/profile', profileRouter);
 
-// ── Upload placeholder ──────────────────────────────────────────────────────
-app.post('/api/upload', authMiddleware, (_req, res) => {
-  res.json({ url: `https://placehold.co/400x400/png?text=SP&t=${Date.now()}` });
+// ── Upload with Supabase Storage ─────────────────────────────────────────────
+const multer = require('multer');
+const uploadMiddleware = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
+
+app.post('/api/upload', authMiddleware, uploadMiddleware.single('file'), async (req, res) => {
+  try {
+    const type = req.body?.type || 'avatar'; // avatar | cover
+    const file = req.file;
+    if (!file) {
+      // Fallback for clients that send without actual file (placeholder)
+      return res.json({ url: `https://placehold.co/400x400/png?text=SP&t=${Date.now()}` });
+    }
+
+    const ext = (file.originalname || 'image.jpg').split('.').pop() || 'jpg';
+    const filename = `${type}/${req.userId}_${Date.now()}.${ext}`;
+    const client = db.raw();
+
+    // Upload to Supabase Storage (bucket: avatars)
+    const { data, error } = await client.storage
+      .from('avatars')
+      .upload(filename, file.buffer, {
+        contentType: file.mimetype || 'image/jpeg',
+        upsert: true,
+      });
+
+    if (error) {
+      console.error('Storage upload error:', error);
+      // Fallback to placeholder
+      return res.json({ url: `https://placehold.co/400x400/png?text=SP&t=${Date.now()}` });
+    }
+
+    // Get public URL
+    const { data: urlData } = client.storage.from('avatars').getPublicUrl(filename);
+    const url = urlData?.publicUrl;
+
+    if (!url) {
+      return res.json({ url: `https://placehold.co/400x400/png?text=SP&t=${Date.now()}` });
+    }
+
+    // Update user record
+    if (type === 'avatar') {
+      await db.update('users', req.userId, { avatar_url: url });
+    } else if (type === 'cover') {
+      await db.update('users', req.userId, { cover_url: url });
+    }
+
+    res.json({ url });
+  } catch (e) {
+    console.error('Upload error:', e);
+    res.json({ url: `https://placehold.co/400x400/png?text=SP&t=${Date.now()}` });
+  }
 });
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -1072,8 +1124,17 @@ convsRouter.get('/', async (req, res) => {
     for (const c of (data || [])) {
       const otherId = c.user1_id === req.userId ? c.user2_id : c.user1_id;
       const other = await userById(otherId);
+      // Format lastMessage as proper object (DB stores it as plain string)
+      const lastMsgRaw = c.last_message;
+      const lastMessage = lastMsgRaw
+        ? { content: typeof lastMsgRaw === 'string' ? lastMsgRaw : (lastMsgRaw.content || String(lastMsgRaw)), createdAt: c.updated_at || c.created_at, isMine: false }
+        : null;
+      const convData = toCamel(c);
+      // Remove raw lastMessage from spread to avoid conflict
+      delete convData.lastMessage;
       result.push({
-        ...toCamel(c), type: c.type || 'direct', hasUnread: false,
+        ...convData, type: c.type || 'direct', hasUnread: false,
+        lastMessage,
         partner: other
           ? { id: other.id, name: other.name, avatarUrl: other.avatar_url || null }
           : { id: otherId, name: 'Bilinmeyen', avatarUrl: null },
@@ -1553,7 +1614,7 @@ postsRouter.use(authMiddleware);
 
 postsRouter.get('/', async (req, res) => {
   try {
-    const { page = 1, pageSize = 20, postType, cityId } = req.query;
+    const { page = 1, pageSize = 20, postType, cityId, cityName } = req.query;
     const pg = Number(page);
     const ps = Math.min(50, Number(pageSize));
     const skip = (pg - 1) * ps;
@@ -1562,6 +1623,7 @@ postsRouter.get('/', async (req, res) => {
     let q = client.from('posts').select('*').order('created_at', { ascending: false });
     if (postType) q = q.eq('post_type', postType);
     if (cityId) q = q.eq('city_id', cityId);
+    if (cityName) q = q.ilike('city_name', `%${cityName}%`);
     q = q.range(skip, skip + ps - 1);
 
     const { data } = await q;
@@ -1852,13 +1914,22 @@ postsRouter.get('/:id/comments', async (req, res) => {
       };
     }
 
-    // Build two-level tree
-    const enriched = postComments.filter(c => !c.parent_id).map(c => ({
-      ...enrichComment(c),
-      replies: postComments.filter(x => x.parent_id === c.id).map(r => ({ ...enrichComment(r), replies: [] })),
-    }));
+    // Build full recursive tree (supports unlimited nesting depth)
+    const commentMap = {};
+    for (const c of postComments) {
+      commentMap[c.id] = { ...enrichComment(c), replies: [] };
+    }
+    const roots = [];
+    for (const c of postComments) {
+      const enriched = commentMap[c.id];
+      if (c.parent_id && commentMap[c.parent_id]) {
+        commentMap[c.parent_id].replies.push(enriched);
+      } else {
+        roots.push(enriched);
+      }
+    }
 
-    res.json({ data: enriched });
+    res.json({ data: roots });
   } catch (e) { res.status(500).json({ message: e.message }); }
 });
 
@@ -2515,6 +2586,8 @@ ecosystemRouter.post('/', async (req, res) => {
       sportIds = [],
       listingType = 'PARTNER',
       botsPerCity = 6,
+      botsPerGroup,
+      groupsPerCity = 1,
       maxParticipants = 4,
       hourlyApplications = 2,
     } = req.body;
@@ -2526,7 +2599,9 @@ ecosystemRouter.post('/', async (req, res) => {
       return res.status(400).json({ message: 'Ülke kodu gerekli (countryCode).' });
     }
 
-    const perCity = Math.min(20, Math.max(4, parseInt(botsPerCity) || 6));
+    // botsPerGroup * groupsPerCity = total bots per city (if botsPerGroup sent from Flutter)
+    const totalBotsPerCity = botsPerGroup ? Math.min(40, (parseInt(botsPerGroup) || 8) * (parseInt(groupsPerCity) || 1)) : (parseInt(botsPerCity) || 6);
+    const perCity = Math.min(40, Math.max(4, totalBotsPerCity));
     const maxPart = Math.min(6, Math.max(3, parseInt(maxParticipants) || 4));
     const hourlyApps = Math.min(5, Math.max(1, parseInt(hourlyApplications) || 2));
 
