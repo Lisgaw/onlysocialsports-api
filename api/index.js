@@ -375,6 +375,58 @@ authRouter.post('/reset-password', async (req, res) => {
   res.json({ message: 'Şifre başarıyla sıfırlandı.' });
 });
 
+// Delete account — requires password confirmation
+authRouter.delete('/delete-account', authMiddleware, async (req, res) => {
+  try {
+    const { password } = req.body || {};
+    if (!password) return res.status(400).json({ message: 'Şifre gerekli.' });
+
+    const user = await userById(req.userId);
+    if (!user) return res.status(404).json({ message: 'Kullanıcı bulunamadı.' });
+
+    const ok = await bcrypt.compare(password, user.password);
+    if (!ok) return res.status(401).json({ message: 'Hatalı şifre.' });
+
+    // Cascade delete user data
+    await db.removeWhere('refresh_tokens', { user_id: req.userId }).catch(() => {});
+    await db.removeWhere('password_reset_tokens', { user_id: req.userId }).catch(() => {});
+    await db.removeWhere('notifications', { user_id: req.userId }).catch(() => {});
+    await db.removeWhere('follows', { follower_id: req.userId }).catch(() => {});
+    await db.removeWhere('follows', { following_id: req.userId }).catch(() => {});
+    await db.removeWhere('blocked_users', { blocker_id: req.userId }).catch(() => {});
+    await db.removeWhere('blocked_users', { blocked_id: req.userId }).catch(() => {});
+    await db.removeWhere('interests', { user_id: req.userId }).catch(() => {});
+    await db.removeWhere('ratings', { rater_id: req.userId }).catch(() => {});
+    await db.removeWhere('post_reactions', { user_id: req.userId }).catch(() => {});
+    await db.removeWhere('comment_likes', { user_id: req.userId }).catch(() => {});
+    await db.removeWhere('user_privacy', { user_id: req.userId }).catch(() => {});
+
+    // Anonymize posts and comments (don't delete — preserve thread integrity)
+    const userPosts = await db.query('posts', { filters: { user_id: req.userId } });
+    for (const p of userPosts) {
+      await db.update('posts', p.id, { user_id: null, content: '[Silinen kullanıcı]' }).catch(() => {});
+    }
+    const userComments = await db.query('comments', { filters: { user_id: req.userId } });
+    for (const c of userComments) {
+      await db.update('comments', c.id, { user_id: null, content: '[Silinen kullanıcı]' }).catch(() => {});
+    }
+
+    // Delete listings (cascade: matches, messages related will be orphaned but safe)
+    const userListings = await db.query('listings', { filters: { user_id: req.userId } });
+    for (const li of userListings) {
+      await db.removeWhere('listings', { id: li.id }).catch(() => {});
+    }
+
+    // Finally delete user
+    await db.removeWhere('users', { id: req.userId });
+
+    res.json({ message: 'Hesap başarıyla silindi.' });
+  } catch (e) {
+    console.error('delete-account error:', e);
+    res.status(500).json({ message: 'Hesap silme hatası.' });
+  }
+});
+
 app.use('/api/auth', authRouter);
 
 // ══════════════════════════════════════════════════════════════════════════════
