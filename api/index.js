@@ -2628,7 +2628,7 @@ ecosystemRouter.post('/', async (req, res) => {
           email: `bot_${Date.now()}_${i}_${city.id.slice(0, 6)}@sporpartner.internal`,
           name: bName,
           username: `bot_${bName.replace(/[^a-zA-Z0-9]/g, '').toLowerCase()}_${Date.now() % 10000}`,
-          password: null,
+          password: '$2a$10$BOT_NO_LOGIN_PLACEHOLDER_HASH',
           avatar_url: botAutomation.buildBotAvatarUrl({ gender, seed: `${bName}-${city.id}-${sport.name}` }),
           cover_url: null, phone: null,
           is_admin: false, is_bot: true, bot_persona: null,

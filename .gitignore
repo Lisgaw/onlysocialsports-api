@@ -5,3 +5,4 @@ node_modules/
 store-snapshot.json
 load-test/
 .vercel
+.env*.local
