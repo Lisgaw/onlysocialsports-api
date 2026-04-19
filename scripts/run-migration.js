@@ -5,10 +5,15 @@
 const { Client } = require('pg');
 const fs = require('fs');
 const path = require('path');
+require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
 
 async function runMigration() {
   // Supabase direct connection (Frankfurt eu-central-1)
-  const connectionString = 'postgresql://postgres:7U5Zab6YPA4h6xoO@db.ffduouvqqayyookkgcjo.supabase.co:5432/postgres';
+  const connectionString = process.env.DIRECT_URL || process.env.DATABASE_URL;
+  if (!connectionString) {
+    console.error('❌ DATABASE_URL or DIRECT_URL not set in .env');
+    process.exit(1);
+  }
 
   console.log('🚀 Connecting to Supabase (Frankfurt)...');
   
