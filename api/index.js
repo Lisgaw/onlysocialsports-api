@@ -2147,11 +2147,10 @@ app.get('/api/cron/ecosystem-tick', async (req, res) => {
 
   try {
     // Ecosystem tick-all mantığını çağır
-    const ecosystems = await db.query('bot_ecosystems', { filters: { is_active: true } });
+    const ecosystems = await db.query('bot_ecosystems', { filters: { status: 'ACTIVE' } });
     let tickedCount = 0;
     const results = [];
     for (const eco of ecosystems) {
-      if (eco.status !== 'ACTIVE') continue;
       try {
         const r = await runEcosystemTick(eco);
         results.push({ ecoId: eco.id, cityName: eco.city_name, ...r });
