@@ -158,13 +158,18 @@ async function pushNotification(n) {
 async function userById(id) { return id ? await db.findById('users', id) : null; }
 async function listingById(id) { return id ? await db.findById('listings', id) : null; }
 
-async function generateMatchReminders({ now = new Date().toISOString(), limit = 200 } = {}) {
+async function generateMatchReminders({ now = new Date().toISOString(), limit = 200, userId = null } = {}) {
   const client = db.raw();
-  const { data: dueMatches } = await client.from('matches').select('*')
+  let dueMatchesQuery = client.from('matches').select('*')
     .in('status', ['SCHEDULED', 'ONGOING'])
     .lte('scheduled_at', now)
-    .is('completed_at', null)
-    .limit(limit);
+    .is('completed_at', null);
+
+  if (userId) {
+    dueMatchesQuery = dueMatchesQuery.or(`user1_id.eq.${userId},user2_id.eq.${userId}`);
+  }
+
+  const { data: dueMatches } = await dueMatchesQuery.limit(limit);
 
   let reminderNotifications = 0;
   if ((dueMatches || []).length === 0) return reminderNotifications;
@@ -2423,6 +2428,8 @@ app.get('/api/notifications', authMiddleware, async (req, res) => {
     const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 20));
     const skip = (page - 1) * limit;
 
+    await generateMatchReminders({ now: new Date().toISOString(), userId: req.userId }).catch(() => 0);
+
     const client = db.raw();
     const { data, count } = await client.from('notifications').select('*', { count: 'exact' })
       .eq('user_id', req.userId)
@@ -2496,6 +2503,8 @@ app.use('/api/settings', settingsRouter);
 // ══════════════════════════════════════════════════════════════════════════════
 app.get('/api/home-feed', authMiddleware, async (req, res) => {
   try {
+    await generateMatchReminders({ now: new Date().toISOString(), userId: req.userId }).catch(() => 0);
+
     const client = db.raw();
     const page = Math.max(1, parseInt(req.query.page) || 1);
     const limit = Math.min(50, Math.max(1, parseInt(req.query.limit) || 20));
@@ -2531,7 +2540,7 @@ app.get('/api/home-feed', authMiddleware, async (req, res) => {
 });
 
 // ══════════════════════════════════════════════════════════════════════════════
-//  CRON JOBS — Vercel Cron ile saatlik tetiklenen endpoint'ler
+//  CRON JOBS — Hobby plan uyumlu bakım endpoint'leri
 // ══════════════════════════════════════════════════════════════════════════════
 app.get('/api/cron/cleanup-expired', async (req, res) => {
   // Vercel Cron Authorization header kontrolü

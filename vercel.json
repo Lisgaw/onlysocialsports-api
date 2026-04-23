@@ -27,16 +27,12 @@
   ],
   "crons": [
     {
-      "path": "/api/cron/match-reminders",
-      "schedule": "*/30 * * * *"
-    },
-    {
       "path": "/api/cron/cleanup-expired",
       "schedule": "0 3 * * *"
     },
     {
       "path": "/api/cron/ecosystem-tick",
-      "schedule": "0 */2 * * *"
+      "schedule": "0 4 * * *"
     }
   ]
 }
