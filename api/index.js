@@ -158,6 +158,67 @@ async function pushNotification(n) {
 async function userById(id) { return id ? await db.findById('users', id) : null; }
 async function listingById(id) { return id ? await db.findById('listings', id) : null; }
 
+async function generateMatchReminders({ now = new Date().toISOString(), limit = 200 } = {}) {
+  const client = db.raw();
+  const { data: dueMatches } = await client.from('matches').select('*')
+    .in('status', ['SCHEDULED', 'ONGOING'])
+    .lte('scheduled_at', now)
+    .is('completed_at', null)
+    .limit(limit);
+
+  let reminderNotifications = 0;
+  if ((dueMatches || []).length === 0) return reminderNotifications;
+
+  const userIds = [...new Set(dueMatches.flatMap(m => [m.user1_id, m.user2_id]))];
+  const matchIds = dueMatches.map(m => m.id);
+  const [{ data: users }, { data: existingReminders }] = await Promise.all([
+    client.from('users').select('id,name,avatar_url').in('id', userIds),
+    client.from('notifications').select('related_id,user_id')
+      .eq('type', 'MATCH_REMINDER')
+      .in('related_id', matchIds),
+  ]);
+  const usersMap = new Map((users || []).map(user => [user.id, user]));
+  const remindedPairs = new Set(
+    (existingReminders || []).map(notification => `${notification.related_id}:${notification.user_id}`),
+  );
+
+  for (const match of dueMatches) {
+    const user1 = usersMap.get(match.user1_id);
+    const user2 = usersMap.get(match.user2_id);
+    const recipients = [
+      {
+        userId: match.user1_id,
+        sender: user2,
+        alreadyApproved: !!match.u1_approved,
+      },
+      {
+        userId: match.user2_id,
+        sender: user1,
+        alreadyApproved: !!match.u2_approved,
+      },
+    ];
+
+    for (const recipient of recipients) {
+      const key = `${match.id}:${recipient.userId}`;
+      if (recipient.alreadyApproved || remindedPairs.has(key)) continue;
+      await pushNotification({
+        userId: recipient.userId,
+        type: 'MATCH_REMINDER',
+        title: 'Maç oynandı mı?',
+        body: `${recipient.sender?.name || 'Rakibin'} ile planlanan maç zamanı geçti. Oynandıysa maçı onaylayın.`,
+        relatedId: match.id,
+        senderId: recipient.sender?.id,
+        senderName: recipient.sender?.name,
+        senderAvatar: recipient.sender?.avatar_url,
+      });
+      remindedPairs.add(key);
+      reminderNotifications++;
+    }
+  }
+
+  return reminderNotifications;
+}
+
 function safeUser(row) {
   if (!row) return null;
   const u = toCamel(row);
@@ -166,6 +227,14 @@ function safeUser(row) {
   u.followersCount = u.followerCount || 0;
   u.avgRating = u.averageRating || 0;
   return u;
+}
+
+function formatNameList(names) {
+  const uniqueNames = [...new Set((names || []).map(name => String(name || '').trim()).filter(Boolean))];
+  if (uniqueNames.length === 0) return '';
+  if (uniqueNames.length === 1) return uniqueNames[0];
+  if (uniqueNames.length === 2) return `${uniqueNames[0]} ve ${uniqueNames[1]}`;
+  return `${uniqueNames.slice(0, -1).join(', ')} ve ${uniqueNames[uniqueNames.length - 1]}`;
 }
 
 const REACTION_TYPES = ['LIKE','LOVE','FIRE','STRONG','WOW','CLAP'];
@@ -439,10 +508,7 @@ profileRouter.get('/', async (req, res) => {
   try {
     const user = await userById(req.userId);
     if (!user) return res.status(404).json({ message: 'Kullanıcı bulunamadı.' });
-    const listings = await db.query('listings', {
-      filters: { user_id: req.userId }, order: 'created_at', ascending: false
-    });
-    res.json({ data: { user: safeUser(user), myListings: listings.map(toCamel) } });
+    res.json({ data: { user: safeUser(user), myListings: [] } });
   } catch (e) { res.status(500).json({ message: e.message }); }
 });
 
@@ -482,19 +548,21 @@ profileRouter.patch('/', contentFilter('name', 'bio', 'username'), async (req, r
     }
 
     // ── cityId / cityName handling ─────────────────────────────────────────
-    // Flutter sends integer IDs from local states.json ("1","2"…)
-    // Supabase cities table has string IDs ("c1","c2"…)
-    // Accept both, fallback to storing name only
-    // IMPORTANT: Always store the original cityId so Flutter can restore geo selection
+    // Flutter geo picker sends local state IDs ("34", "6" ...), but users.city_id
+    // is a FK to the backend cities table. Only persist a city_id when it actually
+    // resolves in the DB; otherwise store the display name and keep the FK null.
     if (body.cityId !== undefined || body.cityName !== undefined) {
       let resolved = false;
       if (body.cityId) {
-        // Store the original cityId so Flutter can restore state from states.json
-        changes.city_id = body.cityId;
-        changes.city = body.cityName || body.city || null;
-        resolved = true;
+        try {
+          const city = await db.findById('cities', body.cityId);
+          if (city) {
+            changes.city_id = city.id;
+            changes.city = city.name;
+            resolved = true;
+          }
+        } catch { /* not found */ }
       }
-      // Fallback: store name only, clear invalid city_id
       if (!resolved) {
         changes.city_id = null;
         if (body.cityName) changes.city = body.cityName;
@@ -531,11 +599,27 @@ profileRouter.patch('/', contentFilter('name', 'bio', 'username'), async (req, r
 
     // Special: sportIds → sports JSONB
     if (body.sportIds !== undefined) {
-      const allSports = await db.query('sports');
-      changes.sports = (body.sportIds || [])
-        .map(id => allSports.find(s => s.id === id))
-        .filter(Boolean)
-        .map(s => ({ id: s.id, name: s.name, icon: s.icon, category: s.category }));
+      const requestedSportIds = Array.isArray(body.sportIds)
+        ? body.sportIds
+          .filter(id => typeof id === 'string')
+          .map(id => id.trim())
+          .filter(Boolean)
+        : [];
+
+      if (requestedSportIds.length === 0) {
+        changes.sports = [];
+      } else {
+        try {
+          const allSports = await db.query('sports');
+          const selectedSports = requestedSportIds
+            .map(id => allSports.find(s => s.id === id))
+            .filter(Boolean);
+          changes.sports = (selectedSports.length > 0 ? selectedSports : requestedSportIds.map(id => ({ id, name: id, icon: '🏅', category: null })))
+            .map(s => ({ id: s.id, name: s.name, icon: s.icon, category: s.category }));
+        } catch {
+          changes.sports = requestedSportIds.map(id => ({ id, name: id, icon: '🏅', category: null }));
+        }
+      }
     }
 
     if (Object.keys(changes).length > 0) {
@@ -612,22 +696,26 @@ listingsRouter.use(authMiddleware);
 
 listingsRouter.get('/', async (req, res) => {
   try {
-    const { sport, city, district, type, level, gender, page = 1, pageSize = 20 } = req.query;
+    const { sport, city, district, type, level, gender, userId, page = 1, pageSize = 20 } = req.query;
     const pg = Number(page);
     const ps = Math.min(50, Number(pageSize));
     const skip = (pg - 1) * ps;
+    const nowIso = new Date().toISOString();
 
     const client = db.raw();
     let q = client.from('listings').select('*')
       .in('status', ['ACTIVE', 'MATCHED'])
+      .gte('expires_at', nowIso)
       .order('created_at', { ascending: false });
 
+    q = q.or(`date.is.null,date.gte.${nowIso}`);
     if (sport) q = q.or(`sport_id.eq.${sport},sport_name.eq.${sport}`);
     if (city)  q = q.or(`city_id.eq.${city},city_name.eq.${city}`);
     if (district) q = q.eq('district_id', district);
     if (type)  q = q.eq('type', type);
     if (level) q = q.eq('level', level);
     if (gender && gender !== 'ANY') q = q.or(`gender.eq.${gender},gender.eq.ANY`);
+    if (userId) q = q.eq('user_id', userId);
     q = q.range(skip, skip + ps - 1);
 
     const { data, error } = await q;
@@ -832,63 +920,195 @@ listingsRouter.patch('/:id/interests/:responseId', async (req, res) => {
 
     const interest = await db.findById('interests', req.params.responseId);
     if (!interest) return res.status(404).json({ message: 'Başvuru bulunamadı.' });
+    if (interest.listing_id !== listing.id) {
+      return res.status(400).json({ message: 'Başvuru bu ilana ait değil.' });
+    }
 
     const { action } = req.body;
     if (action !== 'ACCEPTED' && action !== 'REJECTED')
       return res.status(400).json({ message: "action 'ACCEPTED' veya 'REJECTED' olmalı." });
 
-    await db.update('interests', interest.id, { status: action });
+    const currentStatus = String(interest.status || 'PENDING').toUpperCase();
+
+    if (action === 'REJECTED') {
+      if (currentStatus !== 'REJECTED') {
+        await db.update('interests', interest.id, { status: action });
+        await pushNotification({
+          userId: interest.user_id, type: 'RESPONSE_REJECTED',
+          title: 'Başvurunuz reddedildi',
+          body: 'Başvurunuz reddedildi.',
+          relatedId: listing.id, senderId: req.userId,
+        });
+      }
+      return res.json({ data: { interest: toCamel({ ...interest, status: action }) } });
+    }
+
+    if (currentStatus !== 'PENDING') {
+      return res.status(409).json({ message: 'Bu başvuru zaten işlendi.' });
+    }
+
+    const currentAccepted = listing.accepted_count || 0;
+    const slotsNeeded = Math.max(1, (listing.max_participants || 2) - 1);
+    if (listing.status === 'MATCHED' || currentAccepted >= slotsNeeded) {
+      await db.update('interests', interest.id, { status: 'REJECTED' }).catch(() => {});
+      await pushNotification({
+        userId: interest.user_id,
+        type: 'QUOTA_FULL',
+        title: 'Kontenjan doldu',
+        body: 'İlanın kontenjanı dolduğu için başvurunuz otomatik reddedildi.',
+        relatedId: listing.id,
+        senderId: req.userId,
+      });
+      return res.status(409).json({ message: 'İlan kontenjanı doldu.' });
+    }
+
+    if (listing.date) {
+      const client = db.raw();
+      const scheduledAt = new Date(listing.date);
+      if (!Number.isNaN(scheduledAt.getTime())) {
+        const windowStart = new Date(scheduledAt.getTime() - 60000).toISOString();
+        const windowEnd = new Date(scheduledAt.getTime() + 60000).toISOString();
+        const [ownerConflict, applicantConflict] = await Promise.all([
+          client.from('matches').select('id', { count: 'exact', head: true })
+            .or(`user1_id.eq.${listing.user_id},user2_id.eq.${listing.user_id}`)
+            .in('status', ['SCHEDULED', 'ONGOING'])
+            .neq('listing_id', listing.id)
+            .gte('scheduled_at', windowStart)
+            .lte('scheduled_at', windowEnd),
+          client.from('matches').select('id', { count: 'exact', head: true })
+            .or(`user1_id.eq.${interest.user_id},user2_id.eq.${interest.user_id}`)
+            .in('status', ['SCHEDULED', 'ONGOING'])
+            .neq('listing_id', listing.id)
+            .gte('scheduled_at', windowStart)
+            .lte('scheduled_at', windowEnd),
+        ]);
+
+        if ((ownerConflict.count || 0) > 0 || (applicantConflict.count || 0) > 0) {
+          return res.status(409).json({
+            message: 'Bu tarih ve saatte mevcut bir eşleşme var. Lütfen farklı bir zaman seçin.',
+          });
+        }
+      }
+    }
 
     if (action === 'ACCEPTED') {
-      const matchId = 'match_' + uuid();
+      await db.update('interests', interest.id, { status: action });
       const u1 = await userById(listing.user_id);
       const u2 = await userById(interest.user_id);
       const sport = listing.sport_id ? await db.findById('sports', listing.sport_id) : null;
+      const isGroupListing = (listing.max_participants || 2) > 2;
 
-      const match = {
-        id: matchId, listing_id: listing.id, source: 'LISTING',
-        user1_id: listing.user_id, user2_id: interest.user_id,
-        status: 'SCHEDULED', u1_approved: false, u2_approved: false,
-        scheduled_at: listing.date || null, completed_at: null,
-      };
-      await db.insert('matches', match);
+      let match = null;
+      if (!isGroupListing) {
+        match = {
+          id: 'match_' + uuid(), listing_id: listing.id, source: 'LISTING',
+          user1_id: listing.user_id, user2_id: interest.user_id,
+          status: 'SCHEDULED', u1_approved: false, u2_approved: false,
+          scheduled_at: listing.date || null, completed_at: null,
+        };
+        await db.insert('matches', match);
+      }
 
       // Update listing capacity
-      const newAccepted = (listing.accepted_count || 0) + 1;
-      const slotsNeeded = Math.max(1, (listing.max_participants || 1) - 1);
+      const newAccepted = currentAccepted + 1;
       const isFull = newAccepted >= slotsNeeded;
       const updates = { accepted_count: newAccepted };
+      let acceptedInterests = [];
+      let groupParticipantIds = [];
+      let groupParticipantNames = [];
       if (isFull) {
+        const client = db.raw();
+        const [{ data: remainingPending }, { data: acceptedRows }] = await Promise.all([
+          client.from('interests').select('*')
+            .eq('listing_id', listing.id)
+            .eq('status', 'PENDING'),
+          client.from('interests').select('user_id')
+            .eq('listing_id', listing.id)
+            .eq('status', 'ACCEPTED'),
+        ]);
+        acceptedInterests = acceptedRows || [];
         updates.status = 'MATCHED';
         await db.updateWhere('interests',
           { listing_id: listing.id, status: 'PENDING' },
           { status: 'REJECTED' }
         );
+
+        if (isGroupListing) {
+          groupParticipantIds = [listing.user_id, ...acceptedInterests.map(row => row.user_id)];
+          const uniqueParticipantIds = [...new Set(groupParticipantIds.filter(Boolean))];
+          const { data: participantUsers } = await client.from('users').select('id,name')
+            .in('id', uniqueParticipantIds);
+          const participantMap = new Map((participantUsers || []).map(user => [user.id, user.name]));
+          groupParticipantNames = uniqueParticipantIds
+            .map(userId => participantMap.get(userId))
+            .filter(Boolean);
+          groupParticipantIds = uniqueParticipantIds;
+        }
+
+        for (const pending of (remainingPending || [])) {
+          await pushNotification({
+            userId: pending.user_id,
+            type: 'QUOTA_FULL',
+            title: 'Kontenjan doldu',
+            body: 'İlan kontenjanı dolduğu için başvurunuz otomatik reddedildi.',
+            relatedId: listing.id,
+            senderId: req.userId,
+          });
+        }
       }
       await db.update('listings', listing.id, updates);
 
-      await pushNotification({
-        userId: interest.user_id, type: 'RESPONSE_ACCEPTED',
-        title: 'Başvurunuz kabul edildi!',
-        body: `${u1?.name || 'İlan sahibi'} başvurunuzu kabul etti.`,
-        relatedId: matchId, senderId: req.userId,
-      });
+      if (match) {
+        await pushNotification({
+          userId: interest.user_id, type: 'RESPONSE_ACCEPTED',
+          title: 'Başvurunuz kabul edildi!',
+          body: `${u1?.name || 'İlan sahibi'} başvurunuzu kabul etti.`,
+          relatedId: match.id, senderId: req.userId,
+        });
+      } else if (isGroupListing && isFull) {
+        const listingLink = `/listings/${listing.id}`;
+        const notifiedIds = new Set();
+        const participantLabel = formatNameList(groupParticipantNames);
+        const sportLabel = sport?.name || listing.sport_name || 'spor etkinliği';
 
-      const matchData = {
-        ...toCamel(match), user1: safeUser(u1), user2: safeUser(u2),
-        listing: { id: listing.id, type: listing.type, sportId: listing.sport_id, sport: sport ? toCamel(sport) : null },
-      };
-      return res.json({ data: { interest: toCamel({ ...interest, status: action }), match: matchData } });
+        for (const participantId of groupParticipantIds) {
+          if (!participantId || notifiedIds.has(participantId)) continue;
+          notifiedIds.add(participantId);
+          await pushNotification({
+            userId: participantId,
+            type: 'NEW_MATCH',
+            title: 'İlanın kotası tamamlandı',
+            body: participantLabel
+              ? `${participantLabel} ${sportLabel} için eşleştiler.`
+              : `İlanın kontenjanı doldu. ${sportLabel} için grup eşleşmesi tamamlandı.`,
+            relatedId: listing.id,
+            link: listingLink,
+            senderId: req.userId,
+            senderName: u1?.name,
+            senderAvatar: u1?.avatar_url,
+          });
+        }
+      } else {
+        await pushNotification({
+          userId: interest.user_id,
+          type: 'RESPONSE_ACCEPTED',
+          title: 'Başvurunuz onaylandı',
+          body: `${u1?.name || 'İlan sahibi'} başvurunuzu onayladı. Kontenjan dolunca grup eşleşmesi tamamlanacak.`,
+          relatedId: null,
+          link: `/listings/${listing.id}`,
+          senderId: req.userId,
+        });
+      }
+
+      const response = { interest: toCamel({ ...interest, status: action }) };
+      if (match) {
+        response.match = {
+          ...toCamel(match), user1: safeUser(u1), user2: safeUser(u2),
+          listing: { id: listing.id, type: listing.type, sportId: listing.sport_id, sport: sport ? toCamel(sport) : null },
+        };
+      }
+      return res.json({ data: response });
     }
-
-    // REJECTED
-    await pushNotification({
-      userId: interest.user_id, type: 'RESPONSE_REJECTED',
-      title: 'Başvurunuz reddedildi',
-      body: 'Başvurunuz reddedildi.',
-      relatedId: listing.id, senderId: req.userId,
-    });
-    res.json({ data: { interest: toCamel({ ...interest, status: action }) } });
   } catch (e) { res.status(500).json({ message: e.message }); }
 });
 
@@ -1141,6 +1361,20 @@ app.use('/api/matches', matchesRouter);
 const convsRouter = express.Router();
 convsRouter.use(authMiddleware);
 
+function normalizeJsonObject(raw) {
+  if (!raw) return {};
+  if (typeof raw === 'string') {
+    try { return JSON.parse(raw); } catch { return {}; }
+  }
+  return typeof raw === 'object' ? raw : {};
+}
+
+function getUnreadCountForUser(conversation, userId) {
+  const unreadFor = normalizeJsonObject(conversation.unread_for);
+  const rawCount = unreadFor[userId];
+  return typeof rawCount === 'number' ? rawCount : parseInt(rawCount || '0', 10) || 0;
+}
+
 async function findOrCreateConv(u1, u2) {
   const client = db.raw();
   const { data } = await client.from('conversations').select('*')
@@ -1172,31 +1406,54 @@ convsRouter.get('/', async (req, res) => {
       .or(`user1_id.eq.${req.userId},user2_id.eq.${req.userId}`)
       .order('updated_at', { ascending: false });
 
-    const result = [];
-    for (const c of (data || [])) {
+    const convs = data || [];
+    const otherIds = [...new Set(convs.map(c => (c.user1_id === req.userId ? c.user2_id : c.user1_id)))];
+    const others = otherIds.length > 0
+      ? (await client.from('users').select('id,name,avatar_url').in('id', otherIds)).data || []
+      : [];
+    const othersMap = new Map(others.map(u => [u.id, u]));
+
+    const result = convs.map(c => {
       const otherId = c.user1_id === req.userId ? c.user2_id : c.user1_id;
-      const other = await userById(otherId);
-      // Format lastMessage as proper object (DB stores it as plain string)
+      const other = othersMap.get(otherId);
       const lastMsgRaw = c.last_message;
+      const lastMsgObj = normalizeJsonObject(lastMsgRaw);
       const lastMessage = lastMsgRaw
-        ? { content: typeof lastMsgRaw === 'string' ? lastMsgRaw : (lastMsgRaw.content || String(lastMsgRaw)), createdAt: c.updated_at || c.created_at, isMine: false }
+        ? {
+            content: typeof lastMsgRaw === 'string' ? lastMsgRaw : (lastMsgObj.content || String(lastMsgRaw)),
+            createdAt: lastMsgObj.createdAt || c.updated_at || c.created_at,
+            isMine: lastMsgObj.senderId === req.userId,
+          }
         : null;
       const convData = toCamel(c);
-      // Remove raw lastMessage from spread to avoid conflict
       delete convData.lastMessage;
-      result.push({
-        ...convData, type: c.type || 'direct', hasUnread: false,
+      return {
+        ...convData,
+        type: c.type || 'direct',
+        hasUnread: getUnreadCountForUser(c, req.userId) > 0,
         lastMessage,
         partner: other
           ? { id: other.id, name: other.name, avatarUrl: other.avatar_url || null }
           : { id: otherId, name: 'Bilinmeyen', avatarUrl: null },
-      });
-    }
+      };
+    });
     res.json({ data: result });
   } catch (e) { res.status(500).json({ message: e.message }); }
 });
 
-convsRouter.patch('/:id/read', (_req, res) => res.json({ success: true }));
+convsRouter.patch('/:id/read', async (req, res) => {
+  try {
+    const conv = await db.findById('conversations', req.params.id);
+    if (!conv) return res.status(404).json({ message: 'Konuşma bulunamadı.' });
+    if (conv.user1_id !== req.userId && conv.user2_id !== req.userId) {
+      return res.status(403).json({ message: 'Bu konuşmaya erişiminiz yok.' });
+    }
+    const unreadFor = normalizeJsonObject(conv.unread_for);
+    unreadFor[req.userId] = 0;
+    await db.update('conversations', conv.id, { unread_for: unreadFor });
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ message: e.message }); }
+});
 
 convsRouter.get('/:id/messages', async (req, res) => {
   try {
@@ -1213,13 +1470,40 @@ convsRouter.post('/:id/messages', contentFilter('content'), async (req, res) => 
     const { content } = req.body;
     if (!content || content.trim().length < 1)
       return res.status(400).json({ message: 'Mesaj içeriği gerekli.' });
+    const conv = await db.findById('conversations', req.params.id);
+    if (!conv) return res.status(404).json({ message: 'Konuşma bulunamadı.' });
+    if (conv.user1_id !== req.userId && conv.user2_id !== req.userId) {
+      return res.status(403).json({ message: 'Bu konuşmaya erişiminiz yok.' });
+    }
+
+    const trimmedContent = content.trim();
+    const createdAt = new Date().toISOString();
     const msg = await db.insert('messages', {
       id: uuid(), conversation_id: req.params.id,
-      sender_id: req.userId, content: content.trim(),
+      sender_id: req.userId, content: trimmedContent,
     });
+    const otherUserId = conv.user1_id === req.userId ? conv.user2_id : conv.user1_id;
+    const unreadFor = normalizeJsonObject(conv.unread_for);
+    unreadFor[req.userId] = 0;
+    unreadFor[otherUserId] = getUnreadCountForUser({ unread_for: unreadFor }, otherUserId) + 1;
     await db.update('conversations', req.params.id, {
-      last_message: content.trim(), updated_at: new Date().toISOString(),
+      last_message: { content: trimmedContent, senderId: req.userId, createdAt },
+      unread_for: unreadFor,
+      updated_at: createdAt,
     }).catch(() => {});
+
+    const sender = await userById(req.userId);
+    await pushNotification({
+      userId: otherUserId,
+      type: 'NEW_MESSAGE',
+      title: 'Yeni mesaj',
+      body: `${sender?.name || 'Birisi'} size mesaj gönderdi.`,
+      relatedId: req.params.id,
+      senderId: req.userId,
+      senderName: sender?.name,
+      senderAvatar: sender?.avatar_url,
+    });
+
     res.status(201).json({ data: toCamel(msg) });
   } catch (e) { res.status(500).json({ message: e.message }); }
 });
@@ -1695,7 +1979,7 @@ postsRouter.use(authMiddleware);
 
 postsRouter.get('/', async (req, res) => {
   try {
-    const { page = 1, pageSize = 20, postType, cityId, cityName, countryCode } = req.query;
+    const { page = 1, pageSize = 20, postType, cityId, cityName, countryCode, userId } = req.query;
     const pg = Number(page);
     const ps = Math.min(50, Number(pageSize));
     const skip = (pg - 1) * ps;
@@ -1706,6 +1990,7 @@ postsRouter.get('/', async (req, res) => {
     if (cityId) q = q.eq('city_id', cityId);
     if (cityName) q = q.ilike('city_name', `%${cityName}%`);
     if (countryCode) q = q.eq('country_code', countryCode);
+    if (userId) q = q.eq('user_id', userId);
     q = q.range(skip, skip + ps - 1);
 
     const { data } = await q;
@@ -2281,10 +2566,32 @@ app.get('/api/cron/cleanup-expired', async (req, res) => {
     const { count: deletedRefresh } = await client.from('refresh_tokens')
       .delete({ count: 'exact' }).lt('expires_at', now);
 
+    // 4. Zamanı geçmiş ama henüz tamamlanmamış maçlar için tek seferlik hatırlatma üret
+    const reminderNotifications = await generateMatchReminders({ now });
+
     res.json({
       message: 'Cleanup completed',
       deletedListings, deletedTokens: deletedTokens || 0,
       deletedRefreshTokens: deletedRefresh || 0,
+      reminderNotifications,
+      timestamp: now,
+    });
+  } catch (e) { res.status(500).json({ message: e.message }); }
+});
+
+app.get('/api/cron/match-reminders', async (req, res) => {
+  const authHeader = req.headers['authorization'];
+  const cronSecret = process.env.CRON_SECRET;
+  if (cronSecret && authHeader !== `Bearer ${cronSecret}`) {
+    return res.status(401).json({ message: 'Unauthorized' });
+  }
+
+  try {
+    const now = new Date().toISOString();
+    const reminderNotifications = await generateMatchReminders({ now });
+    res.json({
+      message: 'Match reminders completed',
+      reminderNotifications,
       timestamp: now,
     });
   } catch (e) { res.status(500).json({ message: e.message }); }
@@ -2366,7 +2673,15 @@ app.get('/api/leaderboard', authMiddleware, async (req, res) => {
       .eq('is_banned', false)
       .order('total_points', { ascending: false })
       .limit(20);
-    const ranked = (data || []).map((u, i) => ({ ...safeUser(u), rank: i + 1 }));
+    const ranked = (data || []).map((u, i) => {
+      const safe = safeUser(u);
+      const cityName = typeof safe.city === 'string' ? safe.city : safe.city?.name;
+      return {
+        ...safe,
+        city: cityName ? { name: cityName } : null,
+        rank: i + 1,
+      };
+    });
     res.json({ ranked });
   } catch (e) { res.status(500).json({ message: e.message }); }
 });
@@ -2459,7 +2774,7 @@ app.get('/api/aktivitelerim', authMiddleware, async (req, res) => {
     const { data: matchData } = await client.from('matches').select('*')
       .or(`user1_id.eq.${req.userId},user2_id.eq.${req.userId}`)
       .order('created_at', { ascending: false })
-      .limit(20);
+      .limit(5);
 
     const mArr = matchData || [];
     // Batch: users + listings + sports for matches
@@ -3077,21 +3392,22 @@ async function runEcosystemTick(eco) {
     await db.update('listings', listing.id, listingUpdates);
     listing.accepted_count = newAccepted; // Update in-memory reference
 
-    // Create match
-    const matchId = 'match_' + uuid();
-    await db.insert('matches', {
-      id: matchId,
-      listing_id: listing.id,
-      source: 'LISTING',
-      user1_id: listing.user_id,
-      user2_id: interest.user_id,
-      status: 'SCHEDULED',
-      u1_approved: false, u2_approved: false,
-      scheduled_at: listing.date || null,
-      completed_at: null,
-    });
+    if ((listing.max_participants || 2) <= 2) {
+      const matchId = 'match_' + uuid();
+      await db.insert('matches', {
+        id: matchId,
+        listing_id: listing.id,
+        source: 'LISTING',
+        user1_id: listing.user_id,
+        user2_id: interest.user_id,
+        status: 'SCHEDULED',
+        u1_approved: false, u2_approved: false,
+        scheduled_at: listing.date || null,
+        completed_at: null,
+      });
+      stats.newMatches++;
+    }
     stats.newAcceptances++;
-    stats.newMatches++;
 
     // Update bot match stats
     await db.raw().from('users').update({ total_matches: db.raw().rpc ? 1 : 1 }).eq('id', listing.user_id);
