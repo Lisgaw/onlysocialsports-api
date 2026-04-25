@@ -693,6 +693,43 @@ app.post('/api/upload', authMiddleware, uploadMiddleware.single('file'), async (
   }
 });
 
+// ── Delete photo (avatar or cover) ───────────────────────────────────────────
+app.delete('/api/upload', authMiddleware, async (req, res) => {
+  try {
+    const type = req.query.type || 'avatar'; // avatar | cover
+    if (type !== 'avatar' && type !== 'cover') {
+      return res.status(400).json({ message: 'type must be avatar or cover' });
+    }
+    const client = db.raw();
+
+    // Get current user to find the file path
+    const user = await db.findOne('users', { id: req.userId });
+    const currentUrl = type === 'avatar' ? user?.avatar_url : user?.cover_url;
+
+    if (currentUrl && currentUrl.includes('supabase')) {
+      // Extract storage path from public URL
+      // URL format: https://xxx.supabase.co/storage/v1/object/public/avatars/<path>
+      const marker = '/object/public/avatars/';
+      const idx = currentUrl.indexOf(marker);
+      if (idx !== -1) {
+        const filePath = currentUrl.slice(idx + marker.length);
+        await client.storage.from('avatars').remove([filePath]).catch((e) => {
+          console.warn('Storage remove warning:', e);
+        });
+      }
+    }
+
+    // Clear the URL in DB
+    const updateData = type === 'avatar' ? { avatar_url: null } : { cover_url: null };
+    await db.update('users', req.userId, updateData);
+
+    res.json({ success: true });
+  } catch (e) {
+    console.error('Delete upload error:', e);
+    res.status(500).json({ message: 'Sunucu hatası.' });
+  }
+});
+
 // ══════════════════════════════════════════════════════════════════════════════
 //  LISTINGS
 // ══════════════════════════════════════════════════════════════════════════════
@@ -2427,8 +2464,11 @@ app.get('/api/notifications', authMiddleware, async (req, res) => {
     const page = Math.max(1, parseInt(req.query.page) || 1);
     const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 20));
     const skip = (page - 1) * limit;
+    const shouldRefreshReminders = req.query.refreshReminders === '1' && page === 1;
 
-    await generateMatchReminders({ now: new Date().toISOString(), userId: req.userId }).catch(() => 0);
+    if (shouldRefreshReminders) {
+      await generateMatchReminders({ now: new Date().toISOString(), userId: req.userId }).catch(() => 0);
+    }
 
     const client = db.raw();
     const { data, count } = await client.from('notifications').select('*', { count: 'exact' })
@@ -2452,6 +2492,85 @@ app.patch('/api/notifications', authMiddleware, async (req, res) => {
     }
     res.json({ message: 'Okundu olarak işaretlendi.' });
   } catch (e) { res.status(500).json({ message: e.message }); }
+});
+
+app.get('/api/notifications/unread-count', authMiddleware, async (req, res) => {
+  try {
+    const unreadCount = await db.count('notifications', {
+      user_id: req.userId,
+      is_read: false,
+    });
+    res.json({ unreadCount: unreadCount || 0 });
+  } catch (e) {
+    res.status(500).json({ message: e.message });
+  }
+});
+
+app.get('/api/badges', authMiddleware, async (req, res) => {
+  try {
+    const nowIso = new Date().toISOString();
+    const client = db.raw();
+
+    const [convsRes, myListingsRes, myPendingResponsesRes, pendingChallengesRes, unreadNotifRes] = await Promise.all([
+      client.from('conversations').select('id,unread_for,user1_id,user2_id')
+        .or(`user1_id.eq.${req.userId},user2_id.eq.${req.userId}`),
+      client.from('listings').select('id,status,date')
+        .eq('user_id', req.userId)
+        .in('status', ['ACTIVE', 'MATCHED']),
+      client.from('interests').select('id', { count: 'exact', head: true })
+        .eq('user_id', req.userId)
+        .eq('status', 'PENDING'),
+      client.from('challenges').select('id', { count: 'exact', head: true })
+        .eq('target_id', req.userId)
+        .eq('status', 'PENDING')
+        .gt('expires_at', nowIso),
+      client.from('notifications').select('id', { count: 'exact', head: true })
+        .eq('user_id', req.userId)
+        .eq('is_read', false),
+    ]);
+
+    const conversations = convsRes.data || [];
+    let unreadMessages = 0;
+    for (const conv of conversations) {
+      const unreadFor = normalizeJsonObject(conv.unread_for);
+      const rawCount = unreadFor[req.userId];
+      const count = typeof rawCount === 'number' ? rawCount : parseInt(rawCount || '0', 10) || 0;
+      if (count > 0) unreadMessages++;
+    }
+
+    const myListings = (myListingsRes.data || []).filter((listing) => {
+      if (String(listing.status || '').toUpperCase() === 'EXPIRED') return false;
+      if (!listing.date) return true;
+      return new Date(listing.date) >= new Date(nowIso);
+    });
+
+    let incomingPendingCount = 0;
+    if (myListings.length > 0) {
+      const listingIds = myListings.map((listing) => listing.id);
+      const pendingIncoming = await client.from('interests')
+        .select('id', { count: 'exact', head: true })
+        .in('listing_id', listingIds)
+        .eq('status', 'PENDING');
+      incomingPendingCount = pendingIncoming.count || 0;
+    }
+
+    const outgoingPendingCount = myPendingResponsesRes.count || 0;
+    const challengePendingCount = pendingChallengesRes.count || 0;
+    const unreadNotifications = unreadNotifRes.count || 0;
+
+    res.json({
+      data: {
+        unreadMessages,
+        activityCount:
+          incomingPendingCount +
+          outgoingPendingCount +
+          challengePendingCount,
+        unreadNotifications,
+      },
+    });
+  } catch (e) {
+    res.status(500).json({ message: e.message });
+  }
 });
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -2503,8 +2622,6 @@ app.use('/api/settings', settingsRouter);
 // ══════════════════════════════════════════════════════════════════════════════
 app.get('/api/home-feed', authMiddleware, async (req, res) => {
   try {
-    await generateMatchReminders({ now: new Date().toISOString(), userId: req.userId }).catch(() => 0);
-
     const client = db.raw();
     const page = Math.max(1, parseInt(req.query.page) || 1);
     const limit = Math.min(50, Math.max(1, parseInt(req.query.limit) || 20));
