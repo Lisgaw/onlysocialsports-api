@@ -6,7 +6,7 @@ Yeni Supabase projesi için env vars güncellendi.
 ## Deploy Edilecek Proje
 - **Vercel Hesabı**: yusuf.kucukugurlu@gmail.com
 - **GitHub Repo**: Lisgaw/onlysocialsports-api
-- **Vercel URL**: https://onlysocialsports-api.vercel.app
+- **Vercel URL**: https://api.onlysocialsport.com (also: https://onlysocialsports-api.vercel.app)
 
 ## Env Variables (Vercel Dashboard'a girilecek)
 
