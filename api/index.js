@@ -1644,6 +1644,10 @@ usersRouter.get('/:id', async (req, res) => {
         isFollowing: follow?.status === 'accepted',
         isPending: follow?.status === 'pending',
         isBlockedByMe,
+        isBot: !!user.is_bot,
+        isVerified: !!user.is_bot,
+        socialLinksClickable: !user.is_bot,
+        socialLinksVisible: true,
       }
     });
   } catch (e) { res.status(500).json({ message: e.message }); }
@@ -1701,6 +1705,11 @@ usersRouter.post('/:id/follow', async (req, res) => {
 
 usersRouter.get('/:id/followers', async (req, res) => {
   try {
+    // Bot profiles: followers list is private — return empty to prevent inspection
+    const targetUser = await userById(req.params.id);
+    if (targetUser && targetUser.is_bot && req.userId !== req.params.id) {
+      return res.json({ data: [], isHidden: true });
+    }
     const accepted = await db.query('follows', { filters: { following_id: req.params.id, status: 'accepted' } });
     const result = [];
     for (const f of accepted) {
@@ -1720,6 +1729,11 @@ usersRouter.get('/:id/followers', async (req, res) => {
 
 usersRouter.get('/:id/following', async (req, res) => {
   try {
+    // Bot profiles: following list is private — return empty to prevent inspection
+    const targetUser = await userById(req.params.id);
+    if (targetUser && targetUser.is_bot && req.userId !== req.params.id) {
+      return res.json({ data: [], isHidden: true });
+    }
     const accepted = await db.query('follows', { filters: { follower_id: req.params.id, status: 'accepted' } });
     const result = [];
     for (const f of accepted) {
@@ -3256,6 +3270,7 @@ ecosystemRouter.post('/', async (req, res) => {
         const botId = 'bot_' + uuid();
         const coords = botAutomation.estimateBotCoordinates({ citySeed: city.id, countryCode: cc });
 
+        const socialLinks = botAutomation.generateBotSocialLinks({ countryCode: cc, name: bName, seed: botId });
         botRows.push({
           id: botId,
           email: `bot_${nowMs}_${i}_${city.id.slice(0, 6)}@sporpartner.internal`,
@@ -3269,16 +3284,28 @@ ecosystemRouter.post('/', async (req, res) => {
           city: city.name, city_id: city.id, country_code: cc,
           district: null, district_id: null,
           bio: botAutomation.generateBotBio({ locale, sportName: sport.name, cityName: city.name }),
-          instagram: null, tiktok: null, facebook: null, twitter: null,
-          youtube: null, linkedin: null, discord: null, twitch: null,
-          snapchat: null, telegram: null, whatsapp: null, vk: null, litmatch: null,
+          instagram: socialLinks.instagram || null,
+          tiktok: socialLinks.tiktok || null,
+          facebook: socialLinks.facebook || null,
+          twitter: socialLinks.twitter || null,
+          youtube: socialLinks.youtube || null,
+          linkedin: socialLinks.linkedin || null,
+          discord: socialLinks.discord || null,
+          twitch: socialLinks.twitch || null,
+          snapchat: socialLinks.snapchat || null,
+          telegram: socialLinks.telegram || null,
+          whatsapp: socialLinks.whatsapp || null,
+          vk: socialLinks.vk || null,
+          litmatch: socialLinks.litmatch || null,
           sports: [{ id: sport.id, name: sport.name, icon: sport.icon }],
           level: ['BEGINNER', 'INTERMEDIATE', 'ADVANCED'][Math.floor(Math.random() * 3)],
           gender,
           preferred_time: null, preferred_style: null,
           birth_date: new Date(1992 + (i % 13), i % 12, 1 + (i % 28)).toISOString(),
           total_matches: 0, current_streak: 0, longest_streak: 0, total_points: 0,
-          follower_count: 0, following_count: 0, average_rating: 0, rating_count: 0,
+          follower_count: 300 + Math.floor(Math.random() * 201),
+          following_count: 300 + Math.floor(Math.random() * 201),
+          average_rating: 0, rating_count: 0,
           is_banned: false, no_show_count: 0, is_private: false,
           latitude: coords.latitude, longitude: coords.longitude,
           referral_code: `SP${Math.random().toString(36).slice(2, 8).toUpperCase()}`,
@@ -3507,7 +3534,7 @@ ecosystemRouter.post('/:id/toggle-bots-privacy', async (req, res) => {
 
 // ── Ecosystem Tick Engine ───────────────────────────────────────────────────
 async function runEcosystemTick(eco) {
-  const stats = { newApplications: 0, newAcceptances: 0, newMatches: 0, newRatings: 0, newListings: 0 };
+  const stats = { newApplications: 0, newAcceptances: 0, newMatches: 0, newRatings: 0, newListings: 0, newPosts: 0, newReactions: 0, newComments: 0 };
 
   // Get all bots in this ecosystem's city
   let bots = await db.query('users', { filters: { is_bot: true, city_id: eco.city_id } });
@@ -3537,6 +3564,7 @@ async function runEcosystemTick(eco) {
         const sport = fillSports[i % fillSports.length];
         const botId = 'bot_' + uuid();
         const coords = botAutomationFill.estimateBotCoordinates({ citySeed: eco.city_id, countryCode: eco.country_code });
+        const fillLinks = botAutomationFill.generateBotSocialLinks({ countryCode: eco.country_code, name: bName, seed: botId });
         fillRows.push({
           id: botId, email: `bot_${nowMs}_fill_${i}_${eco.city_id.slice(0,6)}@sporpartner.internal`,
           name: bName, username: `bot_${bName.replace(/[^a-zA-Z0-9]/g,'').toLowerCase()}_fill_${(nowMs+i)%100000}`,
@@ -3547,15 +3575,27 @@ async function runEcosystemTick(eco) {
           city: eco.city_name, city_id: eco.city_id, country_code: eco.country_code,
           district: null, district_id: null,
           bio: botAutomationFill.generateBotBio({ locale, sportName: sport.name, cityName: eco.city_name }),
-          instagram: null, tiktok: null, facebook: null, twitter: null, youtube: null,
-          linkedin: null, discord: null, twitch: null, snapchat: null, telegram: null,
-          whatsapp: null, vk: null, litmatch: null,
+          instagram: fillLinks.instagram || null,
+          tiktok: fillLinks.tiktok || null,
+          facebook: fillLinks.facebook || null,
+          twitter: fillLinks.twitter || null,
+          youtube: fillLinks.youtube || null,
+          linkedin: fillLinks.linkedin || null,
+          discord: fillLinks.discord || null,
+          twitch: fillLinks.twitch || null,
+          snapchat: fillLinks.snapchat || null,
+          telegram: fillLinks.telegram || null,
+          whatsapp: fillLinks.whatsapp || null,
+          vk: fillLinks.vk || null,
+          litmatch: fillLinks.litmatch || null,
           sports: [{ id: sport.id, name: sport.name, icon: sport.icon }],
           level: ['BEGINNER','INTERMEDIATE','ADVANCED'][Math.floor(Math.random()*3)],
           gender, preferred_time: null, preferred_style: null,
           birth_date: new Date(1992+(i%13), i%12, 1+(i%28)).toISOString(),
           total_matches: 0, current_streak: 0, longest_streak: 0, total_points: 0,
-          follower_count: 0, following_count: 0, average_rating: 0, rating_count: 0,
+          follower_count: 300 + Math.floor(Math.random() * 201),
+          following_count: 300 + Math.floor(Math.random() * 201),
+          average_rating: 0, rating_count: 0,
           is_banned: false, no_show_count: 0, is_private: false,
           latitude: coords.latitude, longitude: coords.longitude,
           referral_code: `SP${Math.random().toString(36).slice(2,8).toUpperCase()}`,
@@ -3782,6 +3822,108 @@ async function runEcosystemTick(eco) {
     }
   }
 
+  // 5. SOCIAL POSTS — Each bot creates 1 post if they haven't posted in ~24h
+  const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  const { data: recentPosts } = await client.from('posts').select('user_id')
+    .in('user_id', botIds)
+    .gte('created_at', oneDayAgo);
+  const recentPosters = new Set((recentPosts || []).map(p => p.user_id));
+
+  const postRows = [];
+  const postSportMap = new Map(); // postId -> sportName for comment context
+  for (const bot of bots) {
+    if (recentPosters.has(bot.id)) continue;
+    const sport = validSports.length > 0
+      ? validSports[Math.floor(Math.random() * validSports.length)]
+      : null;
+    const postId = uuid();
+    const content = botAutomation
+      ? botAutomation.generateBotSocialPost({ locale, sportName: sport?.name, cityName: eco.city_name })
+      : `${bot.name} just completed a ${sport?.name || 'sport'} session!`;
+    postRows.push({
+      id: postId,
+      user_id: bot.id,
+      post_type: 'POST',
+      content,
+      title: null,
+      image_url: null,
+      sport_id: sport?.id || null,
+      city_id: null,
+      city_name: eco.city_name,
+      district_id: null,
+    });
+    postSportMap.set(postId, { userId: bot.id, userName: bot.name });
+  }
+  if (postRows.length > 0) {
+    try {
+      await db.insertMany('posts', postRows);
+      stats.newPosts = postRows.length;
+    } catch (e) { console.error('Bot social post error:', e.message); }
+  }
+
+  // 6. REACTIONS — Get recent bot posts (last 7 days) and have other bots like them
+  const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+  const { data: likeablePosts } = await client.from('posts').select('id,user_id')
+    .in('user_id', botIds)
+    .gte('created_at', sevenDaysAgo)
+    .limit(20);
+
+  if ((likeablePosts || []).length > 0) {
+    // Batch fetch existing reactions for these posts to avoid N+1
+    const postIdsForReaction = likeablePosts.map(p => p.id);
+    const { data: existingReactions } = await client.from('post_reactions').select('post_id,user_id')
+      .in('post_id', postIdsForReaction)
+      .in('user_id', botIds);
+    const reactedSet = new Set((existingReactions || []).map(r => `${r.post_id}:${r.user_id}`));
+
+    const reactionRows = [];
+    for (const post of likeablePosts) {
+      const reactors = bots
+        .filter(b => b.id !== post.user_id)
+        .sort(() => Math.random() - 0.5)
+        .slice(0, 2 + Math.floor(Math.random() * 3));
+      for (const bot of reactors) {
+        if (reactedSet.has(`${post.id}:${bot.id}`)) continue;
+        reactionRows.push({ id: uuid(), post_id: post.id, user_id: bot.id, type: 'LIKE' });
+        reactedSet.add(`${post.id}:${bot.id}`);
+      }
+    }
+    if (reactionRows.length > 0) {
+      try {
+        await db.insertMany('post_reactions', reactionRows);
+        stats.newReactions = reactionRows.length;
+      } catch (e) { console.error('Bot reaction error:', e.message); }
+    }
+  }
+
+  // 7. COMMENTS — Have 1-2 bots comment on a subset of recent posts (~40% per tick)
+  const commentablePosts = (likeablePosts || []).slice(0, 8);
+  if (commentablePosts.length > 0) {
+    const commentRows = [];
+    for (const post of commentablePosts) {
+      if (Math.random() > 0.55) continue;
+      const commenter = bots.filter(b => b.id !== post.user_id)[Math.floor(Math.random() * Math.max(1, bots.length - 1))];
+      if (!commenter) continue;
+      const postOwner = bots.find(b => b.id === post.user_id);
+      const commentContent = botAutomation
+        ? botAutomation.generateBotComment({ locale, posterName: postOwner?.name })
+        : '👏 Great job!';
+      commentRows.push({
+        id: uuid(),
+        post_id: post.id,
+        user_id: commenter.id,
+        parent_id: null,
+        content: commentContent,
+      });
+    }
+    if (commentRows.length > 0) {
+      try {
+        await db.insertMany('comments', commentRows);
+        stats.newComments = commentRows.length;
+      } catch (e) { console.error('Bot comment error:', e.message); }
+    }
+  }
+
   // Update ecosystem stats
   await db.update('bot_ecosystems', eco.id, {
     total_matches: (eco.total_matches || 0) + stats.newMatches,
@@ -3791,6 +3933,215 @@ async function runEcosystemTick(eco) {
 
   return stats;
 }
+
+/**
+ * POST /api/admin/ecosystems/seed-global
+ * Pre-built global ecosystem seeder: 10 countries × 3 cities (30 ecosystems total).
+ * Creates ecosystem records + bots + initial listings in a single request.
+ * Existing ecosystems for the same city_id are skipped.
+ *
+ * Body (optional):
+ *   botsPerCity: 6-10 (default 8) — even number
+ *   sportIds: [] (optional override; defaults to country-preferred sports)
+ *   listingType: 'PARTNER' | 'RIVAL' | 'BOTH' (default 'PARTNER')
+ */
+ecosystemRouter.post('/seed-global', async (req, res) => {
+  try {
+    const botAutomation = getBotAutomation();
+    if (!botAutomation) return res.status(500).json({ message: 'Bot automation module not available.' });
+
+    const {
+      botsPerCity = 8,
+      sportIds = [],
+      listingType = 'PARTNER',
+    } = req.body || {};
+
+    const perCity = Math.min(20, Math.max(6, parseInt(botsPerCity) || 8));
+    const allSports = await db.query('sports');
+    const preferredFallback = ['yoga', 'pilates', 'running', 'hiking', 'table_tennis', 'swimming', 'cycling', 'fitness', 'tennis', 'badminton'];
+
+    const results = [];
+    let totalEcosystems = 0, totalBots = 0, totalListings = 0;
+    const nowMs = Date.now();
+
+    for (const countryData of botAutomation.GLOBAL_ECOSYSTEM_CITIES) {
+      const cc = countryData.countryCode;
+      const locale = botAutomation.mapCountryCodeToLocale(cc);
+      const names = botAutomation.LOCALIZED_NAMES[cc] || botAutomation.DEFAULT_NAMES;
+
+      // Determine sports for this country
+      const countryPreferred = botAutomation.COUNTRY_SPORT_PREFERENCES[cc] || preferredFallback;
+      let selectedSports = sportIds.length > 0
+        ? allSports.filter(s => sportIds.includes(s.id))
+        : allSports.filter(s => countryPreferred.some(k => s.id?.includes(k) || s.name?.toLowerCase().includes(k)));
+      if (selectedSports.length === 0)
+        selectedSports = allSports.filter(s => preferredFallback.some(k => s.id?.includes(k))).slice(0, 6);
+      if (selectedSports.length === 0) selectedSports = allSports.slice(0, 6);
+
+      for (const city of countryData.cities) {
+        // Skip if ecosystem already exists for this city
+        const existing = await db.findOne('bot_ecosystems', { city_id: city.id, status: 'ACTIVE' });
+        if (existing) {
+          results.push({ countryCode: cc, city: city.name, status: 'SKIPPED (exists)' });
+          continue;
+        }
+
+        const ecoId = 'eco_' + uuid();
+        await db.insert('bot_ecosystems', {
+          id: ecoId,
+          scope: 'CITY',
+          country_code: cc,
+          city_id: city.id,
+          city_name: city.name,
+          sport_ids: selectedSports.map(s => s.id),
+          listing_type: listingType,
+          bots_per_city: perCity,
+          max_participants: 4,
+          hourly_applications: 2,
+          status: 'ACTIVE',
+          total_bots: 0,
+          total_listings: 0,
+          total_matches: 0,
+        });
+
+        // Create bots — 70% female, batch insert
+        const femaleCount = Math.round(perCity * 0.7);
+        const botRows = [];
+        const botMeta = [];
+        for (let i = 0; i < perCity; i++) {
+          const isFemale = i < femaleCount;
+          const gender = isFemale ? 'FEMALE' : 'MALE';
+          const nameList = isFemale ? names.female : names.male;
+          const bName = nameList[i % nameList.length];
+          const sport = selectedSports[i % selectedSports.length];
+          const botId = 'bot_' + uuid();
+          const coords = botAutomation.estimateBotCoordinates({ citySeed: city.id, countryCode: cc });
+          const socialLinks = botAutomation.generateBotSocialLinks({ countryCode: cc, name: bName, seed: botId });
+          botRows.push({
+            id: botId,
+            email: `bot_${nowMs}_${cc.toLowerCase()}_${i}_${city.id.slice(-6)}@sporpartner.internal`,
+            name: bName,
+            username: `bot_${bName.replace(/[^a-zA-Z0-9]/g, '').toLowerCase()}_${(nowMs + i) % 100000}`,
+            password: '$2a$10$BOT_NO_LOGIN_PLACEHOLDER_HASH',
+            avatar_url: botAutomation.buildBotAvatarUrl({ gender, seed: `${bName}-${city.id}-${sport.name}` }),
+            cover_url: null, phone: null,
+            is_admin: false, is_bot: true, bot_persona: null,
+            onboarding_done: true, user_type: 'USER',
+            city: city.name, city_id: city.id, country_code: cc,
+            district: null, district_id: null,
+            bio: botAutomation.generateBotBio({ locale, sportName: sport.name, cityName: city.name }),
+            instagram: socialLinks.instagram || null,
+            tiktok: socialLinks.tiktok || null,
+            facebook: socialLinks.facebook || null,
+            twitter: socialLinks.twitter || null,
+            youtube: socialLinks.youtube || null,
+            linkedin: socialLinks.linkedin || null,
+            discord: socialLinks.discord || null,
+            twitch: socialLinks.twitch || null,
+            snapchat: socialLinks.snapchat || null,
+            telegram: socialLinks.telegram || null,
+            whatsapp: socialLinks.whatsapp || null,
+            vk: socialLinks.vk || null,
+            litmatch: socialLinks.litmatch || null,
+            sports: [{ id: sport.id, name: sport.name, icon: sport.icon }],
+            level: ['BEGINNER', 'INTERMEDIATE', 'ADVANCED'][Math.floor(Math.random() * 3)],
+            gender,
+            preferred_time: null, preferred_style: null,
+            birth_date: new Date(1992 + (i % 13), i % 12, 1 + (i % 28)).toISOString(),
+            total_matches: 0, current_streak: 0, longest_streak: 0, total_points: 0,
+            follower_count: 300 + Math.floor(Math.random() * 201),
+            following_count: 300 + Math.floor(Math.random() * 201),
+            average_rating: 0, rating_count: 0,
+            is_banned: false, no_show_count: 0, is_private: false,
+            latitude: coords.latitude, longitude: coords.longitude,
+            referral_code: `SP${Math.random().toString(36).slice(2, 8).toUpperCase()}`,
+          });
+          botMeta.push({ id: botId, name: bName, gender, sportId: sport.id, sportName: sport.name });
+        }
+
+        let botsCreated = [];
+        try {
+          await db.insertMany('users', botRows);
+          botsCreated = botMeta;
+          totalBots += botsCreated.length;
+        } catch (err) {
+          console.error(`Seed-global bot batch error (${city.name}):`, err.message);
+          // Fallback individual inserts
+          for (let i = 0; i < botRows.length; i++) {
+            try { await db.insert('users', botRows[i]); botsCreated.push(botMeta[i]); totalBots++; }
+            catch { /* skip */ }
+          }
+        }
+
+        // Create initial listings for female bots — batch insert
+        const femaleBots = botsCreated.filter(b => b.gender === 'FEMALE');
+        const listingRows = [];
+        for (const bot of femaleBots) {
+          const sport = selectedSports.find(s => s.id === bot.sportId) || selectedSports[0];
+          const lType = listingType === 'BOTH' ? (Math.random() > 0.5 ? 'PARTNER' : 'RIVAL') : listingType;
+          const futureDate = botAutomation.getFutureDate(1 + Math.floor(Math.random() * 6));
+          const coords = botAutomation.estimateBotCoordinates({ citySeed: city.id, countryCode: cc });
+          listingRows.push({
+            id: 'listing_' + uuid(),
+            type: lType,
+            title: botAutomation.generateListingDesc({ name: bot.name, sport: sport.name, locale, city: city.name }),
+            description: botAutomation.generateListingDesc({ name: bot.name, sport: sport.name, locale, city: city.name }),
+            sport_id: sport.id, sport_name: sport.name,
+            city_id: city.id, city_name: city.name,
+            district_id: null, district_name: null,
+            venue_id: null, venue_name: null,
+            level: ['BEGINNER', 'INTERMEDIATE', 'ADVANCED'][Math.floor(Math.random() * 3)],
+            gender: 'ANY',
+            date: futureDate.toISOString(),
+            image_urls: [],
+            max_participants: 4, accepted_count: 0,
+            status: 'ACTIVE',
+            age_min: null, age_max: null,
+            is_recurring: false, is_anonymous: false, is_urgent: false, is_quick: false,
+            response_count: 0,
+            user_id: bot.id, user_name: bot.name, user_avatar: null,
+            latitude: coords.latitude, longitude: coords.longitude,
+            expires_at: new Date(futureDate.getTime() + 7 * 86400000).toISOString(),
+          });
+        }
+
+        let cityListings = 0;
+        if (listingRows.length > 0) {
+          try {
+            await db.insertMany('listings', listingRows);
+            cityListings = listingRows.length;
+            totalListings += cityListings;
+          } catch (err) {
+            console.error(`Seed-global listing batch error (${city.name}):`, err.message);
+          }
+        }
+
+        await db.update('bot_ecosystems', ecoId, {
+          total_bots: botsCreated.length,
+          total_listings: cityListings,
+        });
+
+        totalEcosystems++;
+        results.push({
+          countryCode: cc, city: city.name,
+          status: 'CREATED',
+          bots: botsCreated.length,
+          listings: cityListings,
+          sports: selectedSports.slice(0, 4).map(s => s.name),
+        });
+      }
+    }
+
+    res.json({
+      success: true,
+      message: `${totalEcosystems} ekosistem kuruldu: ${totalBots} bot + ${totalListings} ilan.`,
+      data: { totalEcosystems, totalBots, totalListings, results },
+    });
+  } catch (e) {
+    console.error('Seed-global error:', e);
+    res.status(500).json({ message: e.message });
+  }
+});
 
 app.use('/api/admin/ecosystems', ecosystemRouter);
 
