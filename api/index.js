@@ -1085,6 +1085,30 @@ listingsRouter.patch('/:id/interests/:responseId', async (req, res) => {
             .map(userId => participantMap.get(userId))
             .filter(Boolean);
           groupParticipantIds = uniqueParticipantIds;
+
+          // PARTNER grup eşleşmesi: her kabul edilen katılımcı için
+          // listing sahibiyle ayrı bir matches kaydı oluştur.
+          // Schema değişikliği gerekmez; her katılımcı kendi matches tab'ında görür.
+          const groupMatchRows = acceptedInterests
+            .map(row => row.user_id)
+            .filter(pid => pid && pid !== listing.user_id)
+            .map(participantId => ({
+              id: 'match_' + uuid(),
+              listing_id: listing.id,
+              source: 'LISTING',
+              user1_id: listing.user_id,
+              user2_id: participantId,
+              status: 'SCHEDULED',
+              u1_approved: false,
+              u2_approved: false,
+              scheduled_at: listing.date || null,
+              completed_at: null,
+            }));
+          if (groupMatchRows.length > 0) {
+            await db.insertMany('matches', groupMatchRows).catch(e =>
+              console.error('Group match insert error:', e.message)
+            );
+          }
         }
 
         for (const pending of (remainingPending || [])) {
@@ -1592,8 +1616,11 @@ usersRouter.get('/:id', async (req, res) => {
           avatarUrl: user.avatar_url, coverUrl: user.cover_url,
           followerCount: user.follower_count || 0, followersCount: user.follower_count || 0,
           followingCount: user.following_count || 0, totalMatches: user.total_matches || 0,
-          sports: user.sports || [], avgRating: user.average_rating || 0,
-          ratingCount: user.rating_count || 0, isPrivateProfile: true, isRestricted: true,
+          sports: user.sports || [],
+          avgRating: user.average_rating || 0,
+          averageRating: user.average_rating || 0,
+          ratingCount: user.rating_count || 0,
+          isPrivateProfile: true, isRestricted: true,
           isFollowing: follow?.status === 'accepted', isPending: follow?.status === 'pending',
           isBlockedByMe: false,
         }
@@ -1612,6 +1639,7 @@ usersRouter.get('/:id', async (req, res) => {
         ...safe,
         followersCount: user.follower_count || 0,
         avgRating: user.average_rating || 0,
+        averageRating: user.average_rating || 0,
         ratingCount: user.rating_count || 0,
         isFollowing: follow?.status === 'accepted',
         isPending: follow?.status === 'pending',
@@ -3048,10 +3076,15 @@ app.get('/api/groups', authMiddleware, async (_req, res) => {
 // ══════════════════════════════════════════════════════════════════════════════
 //  BOT ECOSYSTEM — Şehir/Ülke Canlandırma Motoru (Supabase-backed)
 // ══════════════════════════════════════════════════════════════════════════════
-const botAutomation = (() => {
-  try { return require('../lib/bot-automation'); }
-  catch { return null; }
-})();
+// Lazy load: bot-automation modülü (LOCALIZED_NAMES 24 ülke) sadece
+// ecosystem endpoint'i ilk kez çağrıldığında yüklenir — cold start'ı hızlandırır.
+let _botAutomationCache = undefined;
+function getBotAutomation() {
+  if (_botAutomationCache !== undefined) return _botAutomationCache;
+  try { _botAutomationCache = require('../lib/bot-automation'); }
+  catch { _botAutomationCache = null; }
+  return _botAutomationCache;
+}
 
 const ecosystemRouter = express.Router();
 ecosystemRouter.use(authMiddleware);
@@ -3100,6 +3133,7 @@ ecosystemRouter.get('/', async (req, res) => {
  */
 ecosystemRouter.post('/', async (req, res) => {
   try {
+    const botAutomation = getBotAutomation();
     if (!botAutomation) return res.status(500).json({ message: 'Bot automation module not available.' });
 
     const {
@@ -3170,7 +3204,7 @@ ecosystemRouter.post('/', async (req, res) => {
     const allSports = await db.query('sports');
     let selectedSports = sportIds.length > 0
       ? allSports.filter(s => sportIds.includes(s.id))
-      : allSports.filter(s => ['yoga','pilates','running','walking','table_tennis','swimming','cycling','fitness'].some(k => s.id?.includes(k) || s.name?.toLowerCase().includes(k)));
+      : allSports.filter(s => ['yoga','pilates','running','hiking','table_tennis','swimming','cycling','fitness'].some(k => s.id?.includes(k) || s.name?.toLowerCase().includes(k)));
     if (selectedSports.length === 0) selectedSports = allSports.slice(0, 6);
 
     const locale = botAutomation.mapCountryCodeToLocale(countryCode || 'EN');
@@ -3206,12 +3240,13 @@ ecosystemRouter.post('/', async (req, res) => {
       });
       ecosystemIds.push(ecoId);
 
-      // Create bots (mostly female ~70%)
+      // Create bots (mostly female ~70%) — batch insert (tek Supabase çağrısı)
       const femalePct = 0.7;
       const femaleCount = Math.round(perCity * femalePct);
-      const maleCount = perCity - femaleCount;
-      const botsCreated = [];
+      const botRows = [];
+      const botMeta = []; // id/name/gender/sportId bilgisi listings için
 
+      const nowMs = Date.now();
       for (let i = 0; i < perCity; i++) {
         const isFemale = i < femaleCount;
         const gender = isFemale ? 'FEMALE' : 'MALE';
@@ -3219,13 +3254,13 @@ ecosystemRouter.post('/', async (req, res) => {
         const bName = nameList[i % nameList.length];
         const sport = selectedSports[i % selectedSports.length];
         const botId = 'bot_' + uuid();
-
         const coords = botAutomation.estimateBotCoordinates({ citySeed: city.id, countryCode: cc });
-        const botRow = {
+
+        botRows.push({
           id: botId,
-          email: `bot_${Date.now()}_${i}_${city.id.slice(0, 6)}@sporpartner.internal`,
+          email: `bot_${nowMs}_${i}_${city.id.slice(0, 6)}@sporpartner.internal`,
           name: bName,
-          username: `bot_${bName.replace(/[^a-zA-Z0-9]/g, '').toLowerCase()}_${Date.now() % 10000}`,
+          username: `bot_${bName.replace(/[^a-zA-Z0-9]/g, '').toLowerCase()}_${(nowMs + i) % 100000}`,
           password: '$2a$10$BOT_NO_LOGIN_PLACEHOLDER_HASH',
           avatar_url: botAutomation.buildBotAvatarUrl({ gender, seed: `${bName}-${city.id}-${sport.name}` }),
           cover_url: null, phone: null,
@@ -3247,27 +3282,41 @@ ecosystemRouter.post('/', async (req, res) => {
           is_banned: false, no_show_count: 0, is_private: false,
           latitude: coords.latitude, longitude: coords.longitude,
           referral_code: `SP${Math.random().toString(36).slice(2, 8).toUpperCase()}`,
-        };
+        });
+        botMeta.push({ id: botId, name: bName, gender, sportId: sport.id, sportName: sport.name });
+      }
 
-        try {
-          await db.insert('users', botRow);
-          botsCreated.push({ id: botId, name: bName, gender, sportId: sport.id, sportName: sport.name });
-          totalBots++;
-        } catch (err) {
-          console.error(`Bot insert error (${bName}):`, err.message);
+      // Tüm botları tek bir Supabase INSERT çağrısıyla ekle
+      let botsCreated = [];
+      try {
+        await db.insertMany('users', botRows);
+        botsCreated = botMeta;
+        totalBots += botsCreated.length;
+      } catch (err) {
+        console.error(`Bot batch insert error (city: ${city.name}):`, err.message);
+        // Kısmi başarısızlık: bireysel fallback
+        for (let i = 0; i < botRows.length; i++) {
+          try {
+            await db.insert('users', botRows[i]);
+            botsCreated.push(botMeta[i]);
+            totalBots++;
+          } catch (e2) {
+            console.error(`Bot fallback insert error (${botMeta[i].name}):`, e2.message);
+          }
         }
       }
 
-      // Create initial group listings (female bots create listings)
+      // Create initial group listings (female bots create listings) — batch insert
       const femaleBots = botsCreated.filter(b => b.gender === 'FEMALE');
+      const listingRows = [];
       for (const bot of femaleBots) {
         const sport = selectedSports.find(s => s.id === bot.sportId) || selectedSports[0];
         const lType = listingType === 'BOTH' ? (Math.random() > 0.5 ? 'PARTNER' : 'RIVAL') : listingType;
         const futureDate = botAutomation.getFutureDate(1 + Math.floor(Math.random() * 6));
         const coords = botAutomation.estimateBotCoordinates({ citySeed: city.id, countryCode: cc });
-
         const listingId = 'listing_' + uuid();
-        const listingRow = {
+
+        listingRows.push({
           id: listingId,
           type: lType,
           title: botAutomation.generateListingDesc({ name: bot.name, sport: sport.name, locale, city: city.name }),
@@ -3290,20 +3339,35 @@ ecosystemRouter.post('/', async (req, res) => {
           user_avatar: null,
           latitude: coords.latitude, longitude: coords.longitude,
           expires_at: new Date(futureDate.getTime() + 7 * 86400000).toISOString(),
-        };
+        });
+      }
 
+      // Tüm ilanları tek bir Supabase INSERT çağrısıyla ekle
+      let cityListingsCreated = 0;
+      if (listingRows.length > 0) {
         try {
-          await db.insert('listings', listingRow);
-          totalListings++;
+          await db.insertMany('listings', listingRows);
+          cityListingsCreated = listingRows.length;
+          totalListings += cityListingsCreated;
         } catch (err) {
-          console.error(`Listing insert error:`, err.message);
+          console.error(`Listing batch insert error (city: ${city.name}):`, err.message);
+          // Kısmi başarısızlık: bireysel fallback
+          for (const row of listingRows) {
+            try {
+              await db.insert('listings', row);
+              cityListingsCreated++;
+              totalListings++;
+            } catch (e2) {
+              console.error(`Listing fallback insert error:`, e2.message);
+            }
+          }
         }
       }
 
       // Update ecosystem stats
       await db.update('bot_ecosystems', ecoId, {
         total_bots: botsCreated.length,
-        total_listings: femaleBots.length,
+        total_listings: cityListingsCreated,
       });
     }
 
@@ -3446,11 +3510,73 @@ async function runEcosystemTick(eco) {
   const stats = { newApplications: 0, newAcceptances: 0, newMatches: 0, newRatings: 0, newListings: 0 };
 
   // Get all bots in this ecosystem's city
-  const bots = await db.query('users', { filters: { is_bot: true, city_id: eco.city_id } });
-  if (bots.length < 2) return stats;
+  let bots = await db.query('users', { filters: { is_bot: true, city_id: eco.city_id } });
+
+  // If no bots exist (e.g. initial creation timed out), create them now
+  if (bots.length < 2) {
+    const botAutomationFill = getBotAutomation();
+    if (botAutomationFill && eco.city_id && eco.country_code) {
+      const allSportsForFill = await db.query('sports');
+      let fillSports = (eco.sport_ids && eco.sport_ids.length > 0)
+        ? allSportsForFill.filter(s => eco.sport_ids.includes(s.id))
+        : allSportsForFill.filter(s => ['yoga','pilates','running','hiking','table_tennis','swimming','cycling','fitness'].includes(s.id));
+      if (fillSports.length === 0) fillSports = allSportsForFill.filter(s => ['yoga','pilates','fitness','running'].includes(s.id));
+      const perCity = eco.bots_per_city || 6;
+      const femalePct = 0.7;
+      const femaleCount = Math.round(perCity * femalePct);
+      const locale = botAutomationFill.mapCountryCodeToLocale(eco.country_code || 'EN');
+      const names = botAutomationFill.LOCALIZED_NAMES[eco.country_code] || botAutomationFill.DEFAULT_NAMES;
+      const fillRows = [];
+      const fillMeta = [];
+      const nowMs = Date.now();
+      for (let i = 0; i < perCity; i++) {
+        const isFemale = i < femaleCount;
+        const gender = isFemale ? 'FEMALE' : 'MALE';
+        const nameList = isFemale ? names.female : names.male;
+        const bName = nameList[i % nameList.length];
+        const sport = fillSports[i % fillSports.length];
+        const botId = 'bot_' + uuid();
+        const coords = botAutomationFill.estimateBotCoordinates({ citySeed: eco.city_id, countryCode: eco.country_code });
+        fillRows.push({
+          id: botId, email: `bot_${nowMs}_fill_${i}_${eco.city_id.slice(0,6)}@sporpartner.internal`,
+          name: bName, username: `bot_${bName.replace(/[^a-zA-Z0-9]/g,'').toLowerCase()}_fill_${(nowMs+i)%100000}`,
+          password: '$2a$10$BOT_NO_LOGIN_PLACEHOLDER_HASH',
+          avatar_url: botAutomationFill.buildBotAvatarUrl({ gender, seed: `${bName}-${eco.city_id}-${sport.name}` }),
+          cover_url: null, phone: null, is_admin: false, is_bot: true, bot_persona: null,
+          onboarding_done: true, user_type: 'USER',
+          city: eco.city_name, city_id: eco.city_id, country_code: eco.country_code,
+          district: null, district_id: null,
+          bio: botAutomationFill.generateBotBio({ locale, sportName: sport.name, cityName: eco.city_name }),
+          instagram: null, tiktok: null, facebook: null, twitter: null, youtube: null,
+          linkedin: null, discord: null, twitch: null, snapchat: null, telegram: null,
+          whatsapp: null, vk: null, litmatch: null,
+          sports: [{ id: sport.id, name: sport.name, icon: sport.icon }],
+          level: ['BEGINNER','INTERMEDIATE','ADVANCED'][Math.floor(Math.random()*3)],
+          gender, preferred_time: null, preferred_style: null,
+          birth_date: new Date(1992+(i%13), i%12, 1+(i%28)).toISOString(),
+          total_matches: 0, current_streak: 0, longest_streak: 0, total_points: 0,
+          follower_count: 0, following_count: 0, average_rating: 0, rating_count: 0,
+          is_banned: false, no_show_count: 0, is_private: false,
+          latitude: coords.latitude, longitude: coords.longitude,
+          referral_code: `SP${Math.random().toString(36).slice(2,8).toUpperCase()}`,
+        });
+        fillMeta.push({ id: botId, name: bName, gender, sportId: sport.id });
+      }
+      try {
+        await db.insertMany('users', fillRows);
+        await db.update('bot_ecosystems', eco.id, { total_bots: perCity });
+        stats.newBots = perCity;
+      } catch (e) {
+        console.error('Tick bot-fill error:', e.message);
+      }
+      bots = await db.query('users', { filters: { is_bot: true, city_id: eco.city_id } });
+    }
+    if (bots.length < 2) return stats;
+  }
 
   const botIds = bots.map(b => b.id);
   const botIdSet = new Set(botIds);
+  const botAutomation = getBotAutomation();
   const locale = botAutomation ? botAutomation.mapCountryCodeToLocale(eco.country_code || 'EN') : 'en';
 
   // 1. APPLICATIONS — Bots apply to active listings
@@ -3604,8 +3730,11 @@ async function runEcosystemTick(eco) {
   const sports = eco.sport_ids ? await Promise.all(eco.sport_ids.map(id => db.findById('sports', id))) : [];
   const validSports = sports.filter(Boolean);
   if (validSports.length === 0) {
-    const allSports = await db.query('sports', { limit: 6 });
-    validSports.push(...allSports);
+    // Fallback: use preferred ecosystem sports (not random DB order)
+    const preferredIds = ['yoga','pilates','fitness','running','hiking','swimming','cycling','table_tennis'];
+    const allSportsFb = await db.query('sports');
+    const preferred = allSportsFb.filter(s => preferredIds.includes(s.id));
+    validSports.push(...(preferred.length > 0 ? preferred : allSportsFb.slice(0, 6)));
   }
 
   // Each female bot should have at most 1 active listing
