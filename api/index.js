@@ -3622,10 +3622,11 @@ async function runEcosystemTick(eco) {
   const locale = botAutomation ? botAutomation.mapCountryCodeToLocale(eco.country_code || 'EN') : 'en';
 
   // 1. APPLICATIONS — Bots apply to active listings
+  // Query by bot user_ids only (city_id may be null for newer bots)
   const client = db.raw();
   const { data: activeListings } = await client.from('listings').select('*')
-    .eq('city_id', eco.city_id).eq('status', 'ACTIVE')
     .in('user_id', botIds)
+    .eq('status', 'ACTIVE')
     .order('created_at', { ascending: false });
 
   for (const listing of (activeListings || [])) {
