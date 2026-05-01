@@ -3840,6 +3840,7 @@ async function runEcosystemTick(eco) {
     .in('user_id', botIds)
     .gte('created_at', oneDayAgo);
   const recentPosters = new Set((recentPosts || []).map(p => p.user_id));
+  stats.debug = { botsCount: bots.length, recentPostersCount: recentPosters.size, validSportsCount: validSports.length };
 
   const postRows = [];
   const postSportMap = new Map(); // postId -> sportName for comment context
@@ -3870,7 +3871,7 @@ async function runEcosystemTick(eco) {
     try {
       await db.insertMany('posts', postRows);
       stats.newPosts = postRows.length;
-    } catch (e) { console.error('Bot social post error:', e.message); }
+    } catch (e) { console.error('Bot social post error:', e.message, e.stack); stats.postError = e.message; }
   }
 
   // 6. REACTIONS — Get recent bot posts (last 7 days) and have other bots like them
