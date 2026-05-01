@@ -3288,7 +3288,7 @@ ecosystemRouter.post('/', async (req, res) => {
           onboarding_done: true, user_type: 'USER',
           city: city.name, city_id: null, country_code: cc,
           district: null, district_id: null,
-          bio: botAutomation.generateBotBio({ locale, sportName: sport.name, cityName: city.name }),
+          bio: botAutomation.generateBotBio({ locale, sportName: sport.name, sportId: sport.id, cityName: city.name }),
           instagram: socialLinks.instagram || null,
           tiktok: socialLinks.tiktok || null,
           facebook: socialLinks.facebook || null,
@@ -3343,15 +3343,18 @@ ecosystemRouter.post('/', async (req, res) => {
       for (const bot of femaleBots) {
         const sport = selectedSports.find(s => s.id === bot.sportId) || selectedSports[0];
         const lType = listingType === 'BOTH' ? (Math.random() > 0.5 ? 'PARTNER' : 'RIVAL') : listingType;
+        // RIVAL listings are always 1v1 (2 people). PARTNER can be 1v1 or group.
+        const lMaxParticipants = lType === 'RIVAL' ? 2 : (Math.random() < 0.4 ? 2 : maxPart);
         const futureDate = botAutomation.getFutureDate(1 + Math.floor(Math.random() * 6));
         const coords = botAutomation.estimateBotCoordinates({ citySeed: city.id, countryCode: cc });
         const listingId = 'listing_' + uuid();
+        const listingDesc = botAutomation.generateListingDesc({ name: bot.name, sport: sport.name, sportId: sport.id, locale, city: city.name, listingType: lType });
 
         listingRows.push({
           id: listingId,
           type: lType,
-          title: botAutomation.generateListingDesc({ name: bot.name, sport: sport.name, locale, city: city.name }),
-          description: botAutomation.generateListingDesc({ name: bot.name, sport: sport.name, locale, city: city.name }),
+          title: listingDesc,
+          description: listingDesc,
           sport_id: sport.id, sport_name: sport.name,
           city_id: null, city_name: city.name,
           district_id: null, district_name: null,
@@ -3360,7 +3363,7 @@ ecosystemRouter.post('/', async (req, res) => {
           gender: 'ANY',
           date: futureDate.toISOString(),
           image_urls: [],
-          max_participants: maxPart,
+          max_participants: lMaxParticipants,
           accepted_count: 0,
           status: 'ACTIVE',
           age_min: null, age_max: null,
@@ -3577,7 +3580,7 @@ async function runEcosystemTick(eco) {
           onboarding_done: true, user_type: 'USER',
           city: eco.city_name, city_id: null, country_code: eco.country_code,
           district: null, district_id: null,
-          bio: botAutomationFill.generateBotBio({ locale, sportName: sport.name, cityName: eco.city_name }),
+          bio: botAutomationFill.generateBotBio({ locale, sportName: sport.name, sportId: sport.id, cityName: eco.city_name }),
           instagram: fillLinks.instagram || null,
           tiktok: fillLinks.tiktok || null,
           facebook: fillLinks.facebook || null,
@@ -3795,12 +3798,17 @@ async function runEcosystemTick(eco) {
     const coords = botAutomation ? botAutomation.estimateBotCoordinates({ citySeed: eco.city_id, countryCode: eco.country_code }) : { latitude: 0, longitude: 0 };
 
     const listingId = 'listing_' + uuid();
+    // RIVAL listings are always 1v1 (2 people). PARTNER can be 1v1 or group.
+    const lMaxParticipants = lType === 'RIVAL' ? 2 : (Math.random() < 0.4 ? 2 : (eco.max_participants || 4));
+    const listingDesc = botAutomation
+      ? botAutomation.generateListingDesc({ name: bot.name, sport: sport.name, sportId: sport.id, locale, city: eco.city_name, listingType: lType })
+      : `${bot.name} - ${sport.name}`;
     try {
       await db.insert('listings', {
         id: listingId,
         type: lType,
-        title: botAutomation ? botAutomation.generateListingDesc({ name: bot.name, sport: sport.name, locale, city: eco.city_name }) : `${bot.name} - ${sport.name}`,
-        description: botAutomation ? botAutomation.generateListingDesc({ name: bot.name, sport: sport.name, locale, city: eco.city_name }) : null,
+        title: listingDesc,
+        description: listingDesc,
         sport_id: sport.id, sport_name: sport.name,
         city_id: null, city_name: eco.city_name,
         district_id: null, district_name: null,
@@ -3809,7 +3817,7 @@ async function runEcosystemTick(eco) {
         gender: 'ANY',
         date: futureDate.toISOString ? futureDate.toISOString() : futureDate,
         image_urls: [],
-        max_participants: eco.max_participants || 4,
+        max_participants: lMaxParticipants,
         accepted_count: 0,
         status: 'ACTIVE',
         age_min: null, age_max: null,
@@ -4031,7 +4039,7 @@ ecosystemRouter.post('/seed-global', async (req, res) => {
             onboarding_done: true, user_type: 'USER',
             city: city.name, city_id: null, country_code: cc,
             district: null, district_id: null,
-            bio: botAutomation.generateBotBio({ locale, sportName: sport.name, cityName: city.name }),
+            bio: botAutomation.generateBotBio({ locale, sportName: sport.name, sportId: sport.id, cityName: city.name }),
             instagram: socialLinks.instagram || null,
             tiktok: socialLinks.tiktok || null,
             facebook: socialLinks.facebook || null,
