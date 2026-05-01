@@ -3119,12 +3119,17 @@ ecosystemRouter.get('/', async (req, res) => {
     const result = [];
     for (const eco of ecosystems) {
       const botCount = await db.count('users', { is_bot: true, city: eco.city_name || undefined });
-      const listingCount = eco.city_id
-        ? (await db.raw().from('listings').select('id', { count: 'exact', head: true })
-            .eq('city_id', eco.city_id).eq('status', 'ACTIVE')
-            .in('user_id', (await db.query('users', { select: 'id', filters: { is_bot: true, city: eco.city_name } })).map(u => u.id))
-          ).count || 0
-        : 0;
+      // Bot listings are created with city_id=null and city_name set — query by city_name
+      const botIds = botCount > 0
+        ? (await db.query('users', { select: 'id', filters: { is_bot: true, city: eco.city_name } })).map(u => u.id)
+        : [];
+      let listingCount = 0;
+      if (botIds.length > 0) {
+        const { count } = await db.raw().from('listings').select('id', { count: 'exact', head: true })
+          .eq('status', 'ACTIVE')
+          .in('user_id', botIds);
+        listingCount = count || 0;
+      }
       result.push({ ...toCamel(eco), botCount, activeListing: listingCount });
     }
     res.json({ data: result });
