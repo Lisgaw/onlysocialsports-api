@@ -3118,11 +3118,11 @@ ecosystemRouter.get('/', async (req, res) => {
     const ecosystems = await db.query('bot_ecosystems', { order: 'created_at', ascending: false });
     const result = [];
     for (const eco of ecosystems) {
-      const botCount = await db.count('users', { is_bot: true, city_id: eco.city_id || undefined });
+      const botCount = await db.count('users', { is_bot: true, city: eco.city_name || undefined });
       const listingCount = eco.city_id
         ? (await db.raw().from('listings').select('id', { count: 'exact', head: true })
             .eq('city_id', eco.city_id).eq('status', 'ACTIVE')
-            .in('user_id', (await db.query('users', { select: 'id', filters: { is_bot: true, city_id: eco.city_id } })).map(u => u.id))
+            .in('user_id', (await db.query('users', { select: 'id', filters: { is_bot: true, city: eco.city_name } })).map(u => u.id))
           ).count || 0
         : 0;
       result.push({ ...toCamel(eco), botCount, activeListing: listingCount });
@@ -3279,9 +3279,9 @@ ecosystemRouter.post('/', async (req, res) => {
           password: '$2a$10$BOT_NO_LOGIN_PLACEHOLDER_HASH',
           avatar_url: botAutomation.buildBotAvatarUrl({ gender, seed: `${bName}-${city.id}-${sport.name}` }),
           cover_url: null, phone: null,
-          is_admin: false, is_bot: true, bot_persona: null,
+          is_admin: false, is_bot: true,
           onboarding_done: true, user_type: 'USER',
-          city: city.name, city_id: city.id, country_code: cc,
+          city: city.name, city_id: null, country_code: cc,
           district: null, district_id: null,
           bio: botAutomation.generateBotBio({ locale, sportName: sport.name, cityName: city.name }),
           instagram: socialLinks.instagram || null,
@@ -3307,7 +3307,6 @@ ecosystemRouter.post('/', async (req, res) => {
           following_count: 300 + Math.floor(Math.random() * 201),
           average_rating: 0, rating_count: 0,
           is_banned: false, no_show_count: 0, is_private: false,
-          latitude: coords.latitude, longitude: coords.longitude,
           referral_code: `SP${Math.random().toString(36).slice(2, 8).toUpperCase()}`,
         });
         botMeta.push({ id: botId, name: bName, gender, sportId: sport.id, sportName: sport.name });
@@ -3349,7 +3348,7 @@ ecosystemRouter.post('/', async (req, res) => {
           title: botAutomation.generateListingDesc({ name: bot.name, sport: sport.name, locale, city: city.name }),
           description: botAutomation.generateListingDesc({ name: bot.name, sport: sport.name, locale, city: city.name }),
           sport_id: sport.id, sport_name: sport.name,
-          city_id: city.id, city_name: city.name,
+          city_id: null, city_name: city.name,
           district_id: null, district_name: null,
           venue_id: null, venue_name: null,
           level: ['BEGINNER', 'INTERMEDIATE', 'ADVANCED'][Math.floor(Math.random() * 3)],
@@ -3364,7 +3363,6 @@ ecosystemRouter.post('/', async (req, res) => {
           response_count: 0,
           user_id: bot.id, user_name: bot.name,
           user_avatar: null,
-          latitude: coords.latitude, longitude: coords.longitude,
           expires_at: new Date(futureDate.getTime() + 7 * 86400000).toISOString(),
         });
       }
@@ -3461,7 +3459,7 @@ ecosystemRouter.delete('/:id', async (req, res) => {
     if (!eco) return res.status(404).json({ message: 'Ekosistem bulunamadı.' });
 
     // Find all bots in this city
-    const bots = await db.query('users', { filters: { is_bot: true, city_id: eco.city_id } });
+    const bots = await db.query('users', { filters: { is_bot: true, city: eco.city_name } });
     const botIds = bots.map(b => b.id);
 
     if (botIds.length > 0) {
@@ -3522,7 +3520,7 @@ ecosystemRouter.post('/:id/toggle-bots-privacy', async (req, res) => {
     if (!eco) return res.status(404).json({ message: 'Ekosistem bulunamadı.' });
 
     const { isPrivate } = req.body;
-    const bots = await db.query('users', { filters: { is_bot: true, city_id: eco.city_id } });
+    const bots = await db.query('users', { filters: { is_bot: true, city: eco.city_name } });
     let updated = 0;
     for (const bot of bots) {
       await db.update('users', bot.id, { is_private: !!isPrivate });
@@ -3537,7 +3535,7 @@ async function runEcosystemTick(eco) {
   const stats = { newApplications: 0, newAcceptances: 0, newMatches: 0, newRatings: 0, newListings: 0, newPosts: 0, newReactions: 0, newComments: 0 };
 
   // Get all bots in this ecosystem's city
-  let bots = await db.query('users', { filters: { is_bot: true, city_id: eco.city_id } });
+  let bots = await db.query('users', { filters: { is_bot: true, city: eco.city_name } });
 
   // If no bots exist (e.g. initial creation timed out), create them now
   if (bots.length < 2) {
@@ -3570,9 +3568,9 @@ async function runEcosystemTick(eco) {
           name: bName, username: `bot_${bName.replace(/[^a-zA-Z0-9]/g,'').toLowerCase()}_fill_${(nowMs+i)%100000}`,
           password: '$2a$10$BOT_NO_LOGIN_PLACEHOLDER_HASH',
           avatar_url: botAutomationFill.buildBotAvatarUrl({ gender, seed: `${bName}-${eco.city_id}-${sport.name}` }),
-          cover_url: null, phone: null, is_admin: false, is_bot: true, bot_persona: null,
+          cover_url: null, phone: null, is_admin: false, is_bot: true,
           onboarding_done: true, user_type: 'USER',
-          city: eco.city_name, city_id: eco.city_id, country_code: eco.country_code,
+          city: eco.city_name, city_id: null, country_code: eco.country_code,
           district: null, district_id: null,
           bio: botAutomationFill.generateBotBio({ locale, sportName: sport.name, cityName: eco.city_name }),
           instagram: fillLinks.instagram || null,
@@ -3597,7 +3595,6 @@ async function runEcosystemTick(eco) {
           following_count: 300 + Math.floor(Math.random() * 201),
           average_rating: 0, rating_count: 0,
           is_banned: false, no_show_count: 0, is_private: false,
-          latitude: coords.latitude, longitude: coords.longitude,
           referral_code: `SP${Math.random().toString(36).slice(2,8).toUpperCase()}`,
         });
         fillMeta.push({ id: botId, name: bName, gender, sportId: sport.id });
@@ -3609,7 +3606,7 @@ async function runEcosystemTick(eco) {
       } catch (e) {
         console.error('Tick bot-fill error:', e.message);
       }
-      bots = await db.query('users', { filters: { is_bot: true, city_id: eco.city_id } });
+      bots = await db.query('users', { filters: { is_bot: true, city: eco.city_name } });
     }
     if (bots.length < 2) return stats;
   }
@@ -3799,7 +3796,7 @@ async function runEcosystemTick(eco) {
         title: botAutomation ? botAutomation.generateListingDesc({ name: bot.name, sport: sport.name, locale, city: eco.city_name }) : `${bot.name} - ${sport.name}`,
         description: botAutomation ? botAutomation.generateListingDesc({ name: bot.name, sport: sport.name, locale, city: eco.city_name }) : null,
         sport_id: sport.id, sport_name: sport.name,
-        city_id: eco.city_id, city_name: eco.city_name,
+        city_id: null, city_name: eco.city_name,
         district_id: null, district_name: null,
         venue_id: null, venue_name: null,
         level: ['BEGINNER', 'INTERMEDIATE', 'ADVANCED'][Math.floor(Math.random() * 3)],
@@ -3813,7 +3810,6 @@ async function runEcosystemTick(eco) {
         is_recurring: false, is_anonymous: false, is_urgent: false, is_quick: false,
         response_count: 0,
         user_id: bot.id, user_name: bot.name, user_avatar: bot.avatar_url,
-        latitude: coords.latitude, longitude: coords.longitude,
         expires_at: new Date((futureDate.getTime ? futureDate.getTime() : Date.now()) + 7 * 86400000).toISOString(),
       });
       stats.newListings++;
@@ -4025,9 +4021,9 @@ ecosystemRouter.post('/seed-global', async (req, res) => {
             password: '$2a$10$BOT_NO_LOGIN_PLACEHOLDER_HASH',
             avatar_url: botAutomation.buildBotAvatarUrl({ gender, seed: `${bName}-${city.id}-${sport.name}` }),
             cover_url: null, phone: null,
-            is_admin: false, is_bot: true, bot_persona: null,
+            is_admin: false, is_bot: true,
             onboarding_done: true, user_type: 'USER',
-            city: city.name, city_id: city.id, country_code: cc,
+            city: city.name, city_id: null, country_code: cc,
             district: null, district_id: null,
             bio: botAutomation.generateBotBio({ locale, sportName: sport.name, cityName: city.name }),
             instagram: socialLinks.instagram || null,
@@ -4053,7 +4049,6 @@ ecosystemRouter.post('/seed-global', async (req, res) => {
             following_count: 300 + Math.floor(Math.random() * 201),
             average_rating: 0, rating_count: 0,
             is_banned: false, no_show_count: 0, is_private: false,
-            latitude: coords.latitude, longitude: coords.longitude,
             referral_code: `SP${Math.random().toString(36).slice(2, 8).toUpperCase()}`,
           });
           botMeta.push({ id: botId, name: bName, gender, sportId: sport.id, sportName: sport.name });
@@ -4087,7 +4082,7 @@ ecosystemRouter.post('/seed-global', async (req, res) => {
             title: botAutomation.generateListingDesc({ name: bot.name, sport: sport.name, locale, city: city.name }),
             description: botAutomation.generateListingDesc({ name: bot.name, sport: sport.name, locale, city: city.name }),
             sport_id: sport.id, sport_name: sport.name,
-            city_id: city.id, city_name: city.name,
+            city_id: null, city_name: city.name,
             district_id: null, district_name: null,
             venue_id: null, venue_name: null,
             level: ['BEGINNER', 'INTERMEDIATE', 'ADVANCED'][Math.floor(Math.random() * 3)],
@@ -4100,7 +4095,6 @@ ecosystemRouter.post('/seed-global', async (req, res) => {
             is_recurring: false, is_anonymous: false, is_urgent: false, is_quick: false,
             response_count: 0,
             user_id: bot.id, user_name: bot.name, user_avatar: null,
-            latitude: coords.latitude, longitude: coords.longitude,
             expires_at: new Date(futureDate.getTime() + 7 * 86400000).toISOString(),
           });
         }
@@ -4484,22 +4478,32 @@ app.post('/api/admin/migrate', authMiddleware, async (req, res) => {
 
 CREATE TABLE IF NOT EXISTS bot_ecosystems (
   id TEXT PRIMARY KEY,
-  group_name TEXT NOT NULL,
   scope TEXT NOT NULL DEFAULT 'CITY',
-  country_code TEXT DEFAULT 'TR',
+  country_code TEXT,
   city_id TEXT,
   city_name TEXT,
   sport_ids TEXT[] DEFAULT '{}',
-  listing_type TEXT DEFAULT 'BOTH',
-  bot_count INTEGER DEFAULT 10,
-  active_bot_count INTEGER DEFAULT 0,
-  target_listings_per_day INTEGER DEFAULT 5,
-  is_active BOOLEAN DEFAULT true,
-  tick_count INTEGER DEFAULT 0,
-  last_tick_at TIMESTAMPTZ,
+  listing_type TEXT DEFAULT 'PARTNER',
+  bots_per_city INTEGER DEFAULT 6,
+  max_participants INTEGER DEFAULT 4,
+  hourly_applications INTEGER DEFAULT 2,
+  status TEXT DEFAULT 'ACTIVE',
+  total_bots INTEGER DEFAULT 0,
+  total_listings INTEGER DEFAULT 0,
+  total_matches INTEGER DEFAULT 0,
   created_at TIMESTAMPTZ DEFAULT NOW(),
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
+
+-- If bot_ecosystems already exists with old schema, run this to migrate:
+-- ALTER TABLE bot_ecosystems ADD COLUMN IF NOT EXISTS bots_per_city INTEGER DEFAULT 6;
+-- ALTER TABLE bot_ecosystems ADD COLUMN IF NOT EXISTS max_participants INTEGER DEFAULT 4;
+-- ALTER TABLE bot_ecosystems ADD COLUMN IF NOT EXISTS hourly_applications INTEGER DEFAULT 2;
+-- ALTER TABLE bot_ecosystems ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'ACTIVE';
+-- ALTER TABLE bot_ecosystems ADD COLUMN IF NOT EXISTS total_bots INTEGER DEFAULT 0;
+-- ALTER TABLE bot_ecosystems ADD COLUMN IF NOT EXISTS total_listings INTEGER DEFAULT 0;
+-- ALTER TABLE bot_ecosystems ADD COLUMN IF NOT EXISTS total_matches INTEGER DEFAULT 0;
+-- UPDATE bot_ecosystems SET status = CASE WHEN is_active THEN 'ACTIVE' ELSE 'PAUSED' END WHERE status IS NULL;
 
 CREATE TABLE IF NOT EXISTS password_reset_tokens (
   id TEXT PRIMARY KEY,
@@ -4513,7 +4517,7 @@ CREATE TABLE IF NOT EXISTS password_reset_tokens (
 CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_token ON password_reset_tokens(token);
 CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_user_id ON password_reset_tokens(user_id);
 CREATE INDEX IF NOT EXISTS idx_listings_expires_at ON listings(expires_at) WHERE status = 'ACTIVE';
-CREATE INDEX IF NOT EXISTS idx_bot_ecosystems_active ON bot_ecosystems(is_active) WHERE is_active = true;
+CREATE INDEX IF NOT EXISTS idx_bot_ecosystems_status ON bot_ecosystems(status);
   ` });
 });
 
