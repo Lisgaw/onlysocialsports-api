@@ -3344,7 +3344,8 @@ ecosystemRouter.post('/', async (req, res) => {
         const sport = selectedSports.find(s => s.id === bot.sportId) || selectedSports[0];
         const lType = listingType === 'BOTH' ? (Math.random() > 0.5 ? 'PARTNER' : 'RIVAL') : listingType;
         // RIVAL listings are always 1v1 (2 people). PARTNER can be 1v1 or group.
-        const lMaxParticipants = lType === 'RIVAL' ? 2 : (Math.random() < 0.4 ? 2 : maxPart);
+        // RIVAL=2, PARTNER=random 1v1(2) or small group(3) — fully automatic
+        const lMaxParticipants = lType === 'RIVAL' ? 2 : (Math.random() < 0.5 ? 2 : 3);
         const futureDate = botAutomation.getFutureDate(1 + Math.floor(Math.random() * 6));
         const coords = botAutomation.estimateBotCoordinates({ citySeed: city.id, countryCode: cc });
         const listingId = 'listing_' + uuid();
@@ -3799,7 +3800,8 @@ async function runEcosystemTick(eco) {
 
     const listingId = 'listing_' + uuid();
     // RIVAL listings are always 1v1 (2 people). PARTNER can be 1v1 or group.
-    const lMaxParticipants = lType === 'RIVAL' ? 2 : (Math.random() < 0.4 ? 2 : (eco.max_participants || 4));
+    // RIVAL=2, PARTNER=random 1v1(2) or small group(3) — fully automatic
+    const lMaxParticipants = lType === 'RIVAL' ? 2 : (Math.random() < 0.5 ? 2 : 3);
     const listingDesc = botAutomation
       ? botAutomation.generateListingDesc({ name: bot.name, sport: sport.name, sportId: sport.id, locale, city: eco.city_name, listingType: lType })
       : `${bot.name} - ${sport.name}`;
@@ -3848,7 +3850,7 @@ async function runEcosystemTick(eco) {
       : null;
     const postId = uuid();
     const content = botAutomation
-      ? botAutomation.generateBotSocialPost({ locale, sportName: sport?.name, cityName: eco.city_name })
+      ? botAutomation.generateBotSocialPost({ locale, sportName: sport?.name, sportId: sport?.id, cityName: eco.city_name })
       : `${bot.name} just completed a ${sport?.name || 'sport'} session!`;
     postRows.push({
       id: postId,
