@@ -4003,8 +4003,16 @@ async function runEcosystemTick(eco) {
       // Fetch existing comments from our bots to avoid double-commenting
       const postIdsC = (postsToComment || []).map(p => p.id);
       const { data: existingComments } = await client.from('comments')
-        .select('post_id,user_id').in('post_id', postIdsC).in('user_id', botIds);
+        .select('post_id,user_id,content').in('post_id', postIdsC).in('user_id', botIds);
       const commentedSet = new Set((existingComments || []).map(c => `${c.user_id}_${c.post_id}`));
+      const normalizeCommentSignature = (v) => normalizeText(String(v || '').replace(/\s+/g, ' '));
+      const usedCommentsByPost = new Map();
+      for (const ec of (existingComments || [])) {
+        const signature = normalizeCommentSignature(ec.content);
+        if (!signature) continue;
+        if (!usedCommentsByPost.has(ec.post_id)) usedCommentsByPost.set(ec.post_id, new Set());
+        usedCommentsByPost.get(ec.post_id).add(signature);
+      }
 
       const commentRows = [];
       for (const bot of bots) {
@@ -4030,13 +4038,35 @@ async function runEcosystemTick(eco) {
                 : sportForComment.name)
             : null;
 
-          const content = botAutomation.generateBotComment({
-            locale: botLocale, sportName: commentSportName, posterName,
-          });
+          const usedForPost = usedCommentsByPost.get(post.id) || new Set();
+          if (!usedCommentsByPost.has(post.id)) usedCommentsByPost.set(post.id, usedForPost);
+
+          let content = '';
+          let pickedSignature = '';
+          // Prevent clone comments on the same post by trying multiple variants.
+          for (let attempt = 0; attempt < 12; attempt++) {
+            const candidate = botAutomation.generateBotComment({
+              locale: botLocale,
+              sportName: commentSportName,
+              posterName,
+              botId: bot.id,
+              postId: post.id,
+              attempt,
+            });
+            const signature = normalizeCommentSignature(candidate);
+            if (!signature || usedForPost.has(signature)) continue;
+            content = candidate;
+            pickedSignature = signature;
+            break;
+          }
+
+          if (!content) continue;
+
           commentRows.push({
             id: uuid(), post_id: post.id, user_id: bot.id,
             parent_id: null, content,
           });
+          if (pickedSignature) usedForPost.add(pickedSignature);
           commentedSet.add(key);
           break; // max 1 comment per bot per tick
         }
