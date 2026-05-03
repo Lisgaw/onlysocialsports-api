@@ -3086,6 +3086,60 @@ function getBotAutomation() {
   return _botAutomationCache;
 }
 
+function buildCityIdVariants(cityId) {
+  if (!cityId) return [];
+  const raw = String(cityId);
+  const variants = new Set([raw]);
+  if (raw.startsWith('state_')) {
+    variants.add(raw.slice(6));
+  } else if (/^\d+$/.test(raw)) {
+    variants.add(`state_${raw}`);
+  }
+  return [...variants].filter(Boolean);
+}
+
+function normalizeText(v) {
+  return String(v || '').trim().toLowerCase();
+}
+
+function botBelongsToEcosystem(bot, eco) {
+  if (!bot || !eco) return false;
+
+  const ecoCountry = String(eco.country_code || '').toUpperCase();
+  const botCountry = String(bot.country_code || '').toUpperCase();
+  const countryMatches = !ecoCountry || !botCountry || ecoCountry === botCountry;
+  if (!countryMatches) return false;
+
+  const idVariants = buildCityIdVariants(eco.city_id);
+  const botCityId = String(bot.city_id || '');
+  if (botCityId && idVariants.includes(botCityId)) return true;
+
+  const ecoCityName = normalizeText(eco.city_name);
+  const botCityName = normalizeText(bot.city);
+  return !!ecoCityName && ecoCityName === botCityName;
+}
+
+async function getBotsForEcosystem(eco) {
+  const client = db.raw();
+  const idVariants = buildCityIdVariants(eco.city_id);
+
+  if (idVariants.length > 0) {
+    let q = client.from('users').select('*').eq('is_bot', true).in('city_id', idVariants);
+    if (eco.country_code) q = q.eq('country_code', eco.country_code);
+    const { data } = await q;
+    if ((data || []).length > 0) return data || [];
+  }
+
+  if (eco.city_name) {
+    let q = client.from('users').select('*').eq('is_bot', true).eq('city', eco.city_name);
+    if (eco.country_code) q = q.eq('country_code', eco.country_code);
+    const { data } = await q;
+    return data || [];
+  }
+
+  return [];
+}
+
 const ecosystemRouter = express.Router();
 ecosystemRouter.use(authMiddleware);
 
@@ -3104,34 +3158,27 @@ ecosystemRouter.get('/', async (req, res) => {
     const ecosystems = await db.query('bot_ecosystems', { order: 'created_at', ascending: false });
     if (ecosystems.length === 0) return res.json({ data: [] });
 
-    // Batch: tüm bot kullanıcılarını tek sorguda çek, JS'te city_id'ye göre grupla
-    const allBotsRes = await db.raw().from('users').select('id, city_id').eq('is_bot', true);
+    // Batch: tüm bot kullanıcılarını tek sorguda çek, city_id + city_name fallback ile eşleştir
+    const allBotsRes = await db.raw().from('users').select('id, city_id, city, country_code').eq('is_bot', true);
     const allBots = allBotsRes.data || [];
+    const allActiveListingsRes = await db.raw().from('listings').select('user_id').eq('status', 'ACTIVE');
+    const allActiveListings = allActiveListingsRes.data || [];
 
-    // city_id → bot count map + bot id set
-    const botCountByCity = {};
-    const botIdSet = new Set();
-    for (const u of allBots) {
-      botIdSet.add(u.id);
-      if (u.city_id) botCountByCity[u.city_id] = (botCountByCity[u.city_id] || 0) + 1;
-    }
-
-    // Bot user ID'leriyle aktif ilanları tek sorguda çek (max 1000)
-    const listingCountByCity = {};
-    if (botIdSet.size > 0) {
-      const botIds = [...botIdSet].slice(0, 1000);
-      const allBotListingsRes = await db.raw().from('listings').select('user_id, city_id').eq('status', 'ACTIVE').in('user_id', botIds);
-      for (const l of (allBotListingsRes.data || [])) {
-        if (l.city_id) listingCountByCity[l.city_id] = (listingCountByCity[l.city_id] || 0) + 1;
+    const result = ecosystems.map(eco => {
+      const ecoBots = allBots.filter(bot => botBelongsToEcosystem(bot, eco));
+      const ecoBotIdSet = new Set(ecoBots.map(b => b.id));
+      let ecoListingCount = 0;
+      for (const listing of allActiveListings) {
+        if (ecoBotIdSet.has(listing.user_id)) ecoListingCount++;
       }
-    }
 
-    const result = ecosystems.map(eco => ({
-      ...toCamel(eco),
-      botCount: eco.city_id ? (botCountByCity[eco.city_id] || 0) : 0,
-      activeListing: eco.city_id ? (listingCountByCity[eco.city_id] || 0) : 0,
-      activeListings: eco.city_id ? (listingCountByCity[eco.city_id] || 0) : 0,
-    }));
+      return {
+        ...toCamel(eco),
+        botCount: ecoBots.length,
+        activeListing: ecoListingCount,
+        activeListings: ecoListingCount,
+      };
+    });
 
     res.json({ data: result });
   } catch (e) { res.status(500).json({ message: e.message }); }
@@ -3453,8 +3500,8 @@ ecosystemRouter.delete('/:id', async (req, res) => {
     const eco = await db.findById('bot_ecosystems', req.params.id);
     if (!eco) return res.status(404).json({ message: 'Ekosistem bulunamadı.' });
 
-    // Find all bots in this city
-    const bots = await db.query('users', { filters: { is_bot: true, city_id: eco.city_id } });
+    // Find all bots in this ecosystem (city_id/city_name fallback)
+    const bots = await getBotsForEcosystem(eco);
     const botIds = bots.map(b => b.id);
 
     if (botIds.length > 0) {
@@ -3515,7 +3562,7 @@ ecosystemRouter.post('/:id/toggle-bots-privacy', async (req, res) => {
     if (!eco) return res.status(404).json({ message: 'Ekosistem bulunamadı.' });
 
     const { isPrivate } = req.body;
-    const bots = await db.query('users', { filters: { is_bot: true, city_id: eco.city_id } });
+    const bots = await getBotsForEcosystem(eco);
     let updated = 0;
     for (const bot of bots) {
       await db.update('users', bot.id, { is_private: !!isPrivate });
@@ -3529,8 +3576,8 @@ ecosystemRouter.post('/:id/toggle-bots-privacy', async (req, res) => {
 async function runEcosystemTick(eco) {
   const stats = { newApplications: 0, newAcceptances: 0, newMatches: 0, newRatings: 0, newListings: 0, newPosts: 0, newReactions: 0, newComments: 0 };
 
-  // Get all bots in this ecosystem's city
-  let bots = await db.query('users', { filters: { is_bot: true, city_id: eco.city_id } });
+  // Get all bots in this ecosystem (city_id format fallback + city_name fallback)
+  let bots = await getBotsForEcosystem(eco);
 
   // If no bots exist (e.g. initial creation timed out), create them now
   if (bots.length < 2) {
@@ -3589,7 +3636,7 @@ async function runEcosystemTick(eco) {
       } catch (e) {
         console.error('Tick bot-fill error:', e.message);
       }
-      bots = await db.query('users', { filters: { is_bot: true, city_id: eco.city_id } });
+      bots = await getBotsForEcosystem(eco);
     }
     if (bots.length < 2) return stats;
   }
@@ -3602,7 +3649,7 @@ async function runEcosystemTick(eco) {
   // 1. APPLICATIONS — Bots apply to active listings
   const client = db.raw();
   const { data: activeListings } = await client.from('listings').select('*')
-    .eq('city_id', eco.city_id).eq('status', 'ACTIVE')
+    .eq('status', 'ACTIVE')
     .in('user_id', botIds)
     .order('created_at', { ascending: false });
 
