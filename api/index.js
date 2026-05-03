@@ -1628,10 +1628,24 @@ usersRouter.get('/:id', async (req, res) => {
     }
 
     const safe = safeUser(user);
-    // Apply social platform visibility
+    const socialClickableByPlatform = {};
+    const platformVisibility = privacy.socialPlatformVisibility || {};
+    let hasSocialLink = false;
+    let hasLockedSocial = false;
+
     for (const p of SOCIAL_PLATFORMS) {
-      if (!(await canViewerSee(req.userId, user.id, privacy.socialPlatformVisibility?.[p])))
-        safe[p] = null;
+      const value = safe[p];
+      const hasValue = typeof value === 'string' ? value.trim().length > 0 : !!value;
+      if (!hasValue) continue;
+
+      hasSocialLink = true;
+      let canClick = await canViewerSee(req.userId, user.id, platformVisibility[p]);
+
+      // Bot social links are visible for realism but never clickable for other users.
+      if (user.is_bot && req.userId !== user.id) canClick = false;
+
+      socialClickableByPlatform[p] = canClick;
+      if (!canClick) hasLockedSocial = true;
     }
 
     res.json({
@@ -1641,6 +1655,9 @@ usersRouter.get('/:id', async (req, res) => {
         avgRating: user.average_rating || 0,
         averageRating: user.average_rating || 0,
         ratingCount: user.rating_count || 0,
+        socialLinksVisible: hasSocialLink,
+        socialLinksClickable: hasSocialLink ? !hasLockedSocial : true,
+        socialClickableByPlatform,
         isFollowing: follow?.status === 'accepted',
         isPending: follow?.status === 'pending',
         isBlockedByMe,
