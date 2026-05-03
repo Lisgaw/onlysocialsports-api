@@ -410,6 +410,19 @@ async function pushNotification(n) {
 async function userById(id) { return id ? await db.findById('users', id) : null; }
 async function listingById(id) { return id ? await db.findById('listings', id) : null; }
 
+function maskAnonymousListingForViewer(listing, viewerId) {
+  if (!listing) return listing;
+  const isOwner = !!viewerId && listing.user_id === viewerId;
+  if (!listing.is_anonymous || isOwner) return listing;
+
+  return {
+    ...listing,
+    user_id: `anon_${listing.id || 'listing'}`,
+    user_name: null,
+    user_avatar: null,
+  };
+}
+
 async function generateMatchReminders({ now = new Date().toISOString(), limit = 200, userId = null } = {}) {
   const client = db.raw();
   let dueMatchesQuery = client.from('matches').select('*')
@@ -1053,9 +1066,11 @@ listingsRouter.get('/', async (req, res) => {
       });
     }
 
+    const visibleRows = rows.map(row => maskAnonymousListingForViewer(row, req.userId));
+
     res.json({
       success: true,
-      data: rows.map(toCamel),
+      data: visibleRows.map(toCamel),
       pagination: { page: pg, hasNext: (data || []).length >= ps }
     });
   } catch (e) { res.status(500).json({ message: e.message }); }
@@ -1083,7 +1098,7 @@ listingsRouter.get('/:id', async (req, res) => {
       });
     }
 
-    const result = toCamel(listing);
+    const result = toCamel(maskAnonymousListingForViewer(listing, req.userId));
     result.applicants = applicants;
     result.acceptedUsers = applicants.filter(a => a.status === 'ACCEPTED');
     result.pendingUsers = applicants.filter(a => a.status === 'PENDING');
