@@ -507,6 +507,59 @@ function formatNameList(names) {
   return `${uniqueNames.slice(0, -1).join(', ')} ve ${uniqueNames[uniqueNames.length - 1]}`;
 }
 
+function isPartnerGroupListing(listing) {
+  if (!listing) return false;
+  const listingType = String(listing.type || '').toUpperCase();
+  const maxParticipants = Number(listing.max_participants || 0);
+  return listingType === 'PARTNER' && maxParticipants > 2;
+}
+
+function isGroupMatchRecord(match, listing = null) {
+  const source = String(match?.source || '').toUpperCase();
+  if (source === 'GROUP_LISTING') return true;
+  return isPartnerGroupListing(listing);
+}
+
+async function getListingAcceptedParticipantIds(listing) {
+  if (!listing || !listing.id) return [];
+  const client = db.raw();
+  const { data } = await client.from('interests').select('user_id')
+    .eq('listing_id', listing.id)
+    .eq('status', 'ACCEPTED');
+
+  const ids = new Set();
+  if (listing.user_id) ids.add(listing.user_id);
+  for (const row of (data || [])) {
+    if (row.user_id) ids.add(row.user_id);
+  }
+  return [...ids];
+}
+
+async function getMatchParticipantIds(match, listing = null) {
+  const base = new Set([match?.user1_id, match?.user2_id].filter(Boolean));
+  if (!match) return [...base];
+
+  const targetListing = listing || (match.listing_id ? await listingById(match.listing_id) : null);
+  if (!isGroupMatchRecord(match, targetListing)) return [...base];
+  if (!targetListing) return [...base];
+
+  const listingParticipants = await getListingAcceptedParticipantIds(targetListing);
+  for (const participantId of listingParticipants) {
+    if (participantId) base.add(participantId);
+  }
+  return [...base];
+}
+
+function pickDisplayUser2IdForViewer({ match, participantIds, viewerId }) {
+  if (!viewerId) return match.user2_id;
+  const participantSet = new Set((participantIds || []).filter(Boolean));
+  if (!participantSet.has(viewerId)) return match.user2_id;
+  if (viewerId === match.user1_id) {
+    return participantIds.find(id => id && id !== match.user1_id) || match.user2_id;
+  }
+  return viewerId;
+}
+
 const REACTION_TYPES = ['LIKE','LOVE','FIRE','STRONG','WOW','CLAP'];
 
 async function enrichPostReactions(postId, currentUserId) {
@@ -1343,9 +1396,10 @@ listingsRouter.patch('/:id/interests/:responseId', async (req, res) => {
       const u1 = await userById(listing.user_id);
       const u2 = await userById(interest.user_id);
       const sport = listing.sport_id ? await db.findById('sports', listing.sport_id) : null;
-      const isGroupListing = (listing.max_participants || 2) > 2;
+      const isGroupListing = isPartnerGroupListing(listing);
 
       let match = null;
+      let groupMatch = null;
       if (!isGroupListing) {
         match = {
           id: 'match_' + uuid(), listing_id: listing.id, source: 'LISTING',
@@ -1363,6 +1417,7 @@ listingsRouter.patch('/:id/interests/:responseId', async (req, res) => {
       let acceptedInterests = [];
       let groupParticipantIds = [];
       let groupParticipantNames = [];
+      let groupParticipantUsers = [];
       if (isFull) {
         const client = db.raw();
         const [{ data: remainingPending }, { data: acceptedRows }] = await Promise.all([
@@ -1383,36 +1438,36 @@ listingsRouter.patch('/:id/interests/:responseId', async (req, res) => {
         if (isGroupListing) {
           groupParticipantIds = [listing.user_id, ...acceptedInterests.map(row => row.user_id)];
           const uniqueParticipantIds = [...new Set(groupParticipantIds.filter(Boolean))];
-          const { data: participantUsers } = await client.from('users').select('id,name')
+          const { data: participantUsers } = await client.from('users').select('id,name,avatar_url')
             .in('id', uniqueParticipantIds);
+          groupParticipantUsers = participantUsers || [];
           const participantMap = new Map((participantUsers || []).map(user => [user.id, user.name]));
           groupParticipantNames = uniqueParticipantIds
             .map(userId => participantMap.get(userId))
             .filter(Boolean);
           groupParticipantIds = uniqueParticipantIds;
 
-          // PARTNER grup eşleşmesi: her kabul edilen katılımcı için
-          // listing sahibiyle ayrı bir matches kaydı oluştur.
-          // Schema değişikliği gerekmez; her katılımcı kendi matches tab'ında görür.
-          const groupMatchRows = acceptedInterests
-            .map(row => row.user_id)
-            .filter(pid => pid && pid !== listing.user_id)
-            .map(participantId => ({
+          const existingGroupMatch = await db.findOne('matches', {
+            listing_id: listing.id,
+            source: 'GROUP_LISTING',
+          });
+          if (existingGroupMatch) {
+            groupMatch = existingGroupMatch;
+          } else {
+            const anchorParticipantId = groupParticipantIds.find(pid => pid && pid !== listing.user_id) || interest.user_id;
+            groupMatch = {
               id: 'match_' + uuid(),
               listing_id: listing.id,
-              source: 'LISTING',
+              source: 'GROUP_LISTING',
               user1_id: listing.user_id,
-              user2_id: participantId,
+              user2_id: anchorParticipantId,
               status: 'SCHEDULED',
               u1_approved: false,
               u2_approved: false,
               scheduled_at: listing.date || null,
               completed_at: null,
-            }));
-          if (groupMatchRows.length > 0) {
-            await db.insertMany('matches', groupMatchRows).catch(e =>
-              console.error('Group match insert error:', e.message)
-            );
+            };
+            await db.insert('matches', groupMatch);
           }
         }
 
@@ -1436,8 +1491,8 @@ listingsRouter.patch('/:id/interests/:responseId', async (req, res) => {
           body: `${u1?.name || 'İlan sahibi'} başvurunuzu kabul etti.`,
           relatedId: match.id, senderId: req.userId,
         });
-      } else if (isGroupListing && isFull) {
-        const listingLink = `/listings/${listing.id}`;
+      } else if (isGroupListing && isFull && groupMatch) {
+        const matchLink = `/matches/${groupMatch.id}`;
         const notifiedIds = new Set();
         const participantLabel = formatNameList(groupParticipantNames);
         const sportLabel = sport?.name || listing.sport_name || 'spor etkinliği';
@@ -1452,8 +1507,8 @@ listingsRouter.patch('/:id/interests/:responseId', async (req, res) => {
             body: participantLabel
               ? `${participantLabel} ${sportLabel} için eşleştiler.`
               : `İlanın kontenjanı doldu. ${sportLabel} için grup eşleşmesi tamamlandı.`,
-            relatedId: listing.id,
-            link: listingLink,
+            relatedId: groupMatch.id,
+            link: matchLink,
             senderId: req.userId,
             senderName: u1?.name,
             senderAvatar: u1?.avatar_url,
@@ -1475,6 +1530,27 @@ listingsRouter.patch('/:id/interests/:responseId', async (req, res) => {
       if (match) {
         response.match = {
           ...toCamel(match), user1: safeUser(u1), user2: safeUser(u2),
+          listing: { id: listing.id, type: listing.type, sportId: listing.sport_id, sport: sport ? toCamel(sport) : null },
+        };
+      } else if (groupMatch) {
+        const displayUser2Id = pickDisplayUser2IdForViewer({
+          match: groupMatch,
+          participantIds: groupParticipantIds,
+          viewerId: req.userId,
+        });
+        const participantMap = new Map(groupParticipantUsers.map(user => [user.id, user]));
+        const displayUser2 = participantMap.get(displayUser2Id) || u2;
+
+        response.match = {
+          ...toCamel(groupMatch),
+          user2Id: displayUser2Id,
+          isGroupMatch: true,
+          participantCount: groupParticipantIds.length,
+          participants: groupParticipantIds
+            .map(userId => safeUser(participantMap.get(userId)))
+            .filter(Boolean),
+          user1: safeUser(u1),
+          user2: safeUser(displayUser2),
           listing: { id: listing.id, type: listing.type, sportId: listing.sport_id, sport: sport ? toCamel(sport) : null },
         };
       }
@@ -1516,32 +1592,101 @@ matchesRouter.get('/', async (req, res) => {
     const offset = (page - 1) * limit;
 
     const client = db.raw();
-    const { data, count } = await client.from('matches').select('*', { count: 'exact' })
-      .or(`user1_id.eq.${req.userId},user2_id.eq.${req.userId}`)
-      .order('created_at', { ascending: false })
-      .range(offset, offset + limit - 1);
-
-    const matches = data || [];
-    if (matches.length === 0) return res.json({ data: [], pagination: { page, hasNext: false, total: 0 } });
-
-    // Batch: collect unique IDs
-    const userIds = new Set();
-    const listingIds = new Set();
-    for (const m of matches) {
-      userIds.add(m.user1_id); userIds.add(m.user2_id);
-      if (m.listing_id) listingIds.add(m.listing_id);
-    }
-
-    // Parallel batch queries
-    const [usersArr, listingsArr] = await Promise.all([
-      userIds.size > 0 ? client.from('users').select('*').in('id', [...userIds]).then(r => r.data || []) : [],
-      listingIds.size > 0 ? client.from('listings').select('*').in('id', [...listingIds]).then(r => r.data || []) : [],
+    const [directMatchesRes, acceptedListingsRes] = await Promise.all([
+      client.from('matches').select('*')
+        .or(`user1_id.eq.${req.userId},user2_id.eq.${req.userId}`)
+        .order('created_at', { ascending: false }),
+      client.from('interests').select('listing_id')
+        .eq('user_id', req.userId)
+        .eq('status', 'ACCEPTED'),
     ]);
 
-    const usersMap = new Map(usersArr.map(u => [u.id, u]));
+    const allMatches = [];
+    const seenMatchIds = new Set();
+    for (const row of (directMatchesRes.data || [])) {
+      if (!row?.id || seenMatchIds.has(row.id)) continue;
+      seenMatchIds.add(row.id);
+      allMatches.push(row);
+    }
+
+    const acceptedListingIds = [...new Set((acceptedListingsRes.data || [])
+      .map(row => row.listing_id)
+      .filter(Boolean))];
+
+    if (acceptedListingIds.length > 0) {
+      const { data: groupMatches } = await client.from('matches').select('*')
+        .eq('source', 'GROUP_LISTING')
+        .in('listing_id', acceptedListingIds)
+        .order('created_at', { ascending: false });
+
+      for (const row of (groupMatches || [])) {
+        if (!row?.id || seenMatchIds.has(row.id)) continue;
+        seenMatchIds.add(row.id);
+        allMatches.push(row);
+      }
+    }
+
+    const sortedMatches = allMatches.sort((a, b) =>
+      new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime()
+    );
+    const total = sortedMatches.length;
+    const matches = sortedMatches.slice(offset, offset + limit);
+    if (matches.length === 0) {
+      return res.json({ data: [], pagination: { page, hasNext: false, total } });
+    }
+
+    const listingIds = [...new Set(matches.map(m => m.listing_id).filter(Boolean))];
+    const groupListingIds = [...new Set(matches
+      .filter(m => String(m.source || '').toUpperCase() === 'GROUP_LISTING')
+      .map(m => m.listing_id)
+      .filter(Boolean))];
+
+    const [listingsArr, acceptedByListingArr] = await Promise.all([
+      listingIds.length > 0
+        ? client.from('listings').select('*').in('id', listingIds).then(r => r.data || [])
+        : [],
+      groupListingIds.length > 0
+        ? client.from('interests').select('listing_id,user_id')
+          .in('listing_id', groupListingIds)
+          .eq('status', 'ACCEPTED')
+          .then(r => r.data || [])
+        : [],
+    ]);
+
     const listingsMap = new Map(listingsArr.map(l => [l.id, l]));
 
-    // Batch sports from listings
+    const acceptedByListingMap = new Map();
+    for (const row of acceptedByListingArr) {
+      if (!row?.listing_id || !row.user_id) continue;
+      if (!acceptedByListingMap.has(row.listing_id)) acceptedByListingMap.set(row.listing_id, new Set());
+      acceptedByListingMap.get(row.listing_id).add(row.user_id);
+    }
+
+    const userIds = new Set();
+    const participantIdsByMatch = new Map();
+    for (const m of matches) {
+      const listing = m.listing_id ? listingsMap.get(m.listing_id) : null;
+      const isGroupMatch = isGroupMatchRecord(m, listing);
+
+      const participantIds = new Set([m.user1_id, m.user2_id].filter(Boolean));
+      if (isGroupMatch && listing?.id) {
+        if (listing.user_id) participantIds.add(listing.user_id);
+        const acceptedSet = acceptedByListingMap.get(listing.id);
+        if (acceptedSet) {
+          for (const userId of acceptedSet) participantIds.add(userId);
+        }
+      }
+
+      const participantList = [...participantIds];
+      participantIdsByMatch.set(m.id, participantList);
+      for (const userId of participantList) userIds.add(userId);
+    }
+
+    const usersArr = userIds.size > 0
+      ? (await client.from('users').select('*').in('id', [...userIds])).data || []
+      : [];
+    const usersMap = new Map(usersArr.map(u => [u.id, u]));
+
     const sportIds = new Set(listingsArr.filter(l => l.sport_id).map(l => l.sport_id));
     const sportsArr = sportIds.size > 0
       ? (await client.from('sports').select('*').in('id', [...sportIds])).data || []
@@ -1549,17 +1694,35 @@ matchesRouter.get('/', async (req, res) => {
     const sportsMap = new Map(sportsArr.map(s => [s.id, s]));
 
     const enriched = matches.map(m => {
-      const u1 = usersMap.get(m.user1_id);
-      const u2 = usersMap.get(m.user2_id);
       const listing = m.listing_id ? listingsMap.get(m.listing_id) : null;
       const sport = listing?.sport_id ? sportsMap.get(listing.sport_id) : null;
+      const participantIds = participantIdsByMatch.get(m.id) || [m.user1_id, m.user2_id].filter(Boolean);
+      const displayUser2Id = pickDisplayUser2IdForViewer({
+        match: m,
+        participantIds,
+        viewerId: req.userId,
+      });
+      const u1 = usersMap.get(m.user1_id);
+      const u2 = usersMap.get(displayUser2Id) || usersMap.get(m.user2_id);
+
       return {
         ...toCamel(m),
-        user1: safeUser(u1), user2: safeUser(u2),
+        user2Id: displayUser2Id,
+        isGroupMatch: isGroupMatchRecord(m, listing),
+        participantCount: participantIds.length,
+        participants: participantIds
+          .map(userId => safeUser(usersMap.get(userId)))
+          .filter(Boolean),
+        user1: safeUser(u1),
+        user2: safeUser(u2),
         listing: listing ? { id: listing.id, type: listing.type, sport: sport ? toCamel(sport) : null } : null,
       };
     });
-    res.json({ data: enriched, pagination: { page, hasNext: offset + limit < (count || 0), total: count || 0 } });
+
+    res.json({
+      data: enriched,
+      pagination: { page, hasNext: offset + limit < total, total },
+    });
   } catch (e) { res.status(500).json({ message: e.message }); }
 });
 
@@ -1567,13 +1730,40 @@ matchesRouter.get('/:id', async (req, res) => {
   try {
     const m = await db.findById('matches', req.params.id);
     if (!m) return res.status(404).json({ message: 'Maç bulunamadı.' });
-    const u1 = await userById(m.user1_id);
-    const u2 = await userById(m.user2_id);
     const listing = m.listing_id ? await listingById(m.listing_id) : null;
+    const participantIds = await getMatchParticipantIds(m, listing);
+    if (!participantIds.includes(req.userId)) {
+      return res.status(403).json({ message: 'Bu maçın katılımcısı değilsiniz.' });
+    }
+
+    const displayUser2Id = pickDisplayUser2IdForViewer({
+      match: m,
+      participantIds,
+      viewerId: req.userId,
+    });
+
+    const client = db.raw();
+    const userIds = [...new Set([...participantIds, m.user1_id, m.user2_id, displayUser2Id].filter(Boolean))];
+    const usersArr = userIds.length > 0
+      ? (await client.from('users').select('*').in('id', userIds)).data || []
+      : [];
+    const usersMap = new Map(usersArr.map(u => [u.id, u]));
+
+    const u1 = usersMap.get(m.user1_id) || await userById(m.user1_id);
+    const u2 = usersMap.get(displayUser2Id) || usersMap.get(m.user2_id) || await userById(m.user2_id);
     const sport = listing?.sport_id ? await db.findById('sports', listing.sport_id) : null;
+
     res.json({
       data: {
-        ...toCamel(m), user1: safeUser(u1), user2: safeUser(u2),
+        ...toCamel(m),
+        user2Id: displayUser2Id,
+        isGroupMatch: isGroupMatchRecord(m, listing),
+        participantCount: participantIds.length,
+        participants: participantIds
+          .map(userId => safeUser(usersMap.get(userId)))
+          .filter(Boolean),
+        user1: safeUser(u1),
+        user2: safeUser(u2),
         listing: listing ? { id: listing.id, type: listing.type, sport: sport ? toCamel(sport) : null } : null,
       }
     });
@@ -1584,6 +1774,13 @@ matchesRouter.post('/:id/complete', async (req, res) => {
   try {
     const m = await db.findById('matches', req.params.id);
     if (!m) return res.status(404).json({ message: 'Maç bulunamadı.' });
+
+    const listing = m.listing_id ? await listingById(m.listing_id) : null;
+    const participantIds = await getMatchParticipantIds(m, listing);
+    if (!participantIds.includes(req.userId)) {
+      return res.status(403).json({ message: 'Bu maçın katılımcısı değilsiniz.' });
+    }
+
     const updated = await db.update('matches', m.id, { status: 'COMPLETED', completed_at: new Date().toISOString() });
     res.json({ data: toCamel(updated) });
   } catch (e) { res.status(500).json({ message: e.message }); }
@@ -1595,50 +1792,84 @@ matchesRouter.patch('/:id/approve', async (req, res) => {
     if (!m) return res.status(404).json({ message: 'Maç bulunamadı.' });
     if (m.status === 'COMPLETED' || m.status === 'CANCELLED') return res.json({ data: toCamel(m) });
 
+    const listing = m.listing_id ? await listingById(m.listing_id) : null;
+    const participantIds = await getMatchParticipantIds(m, listing);
+    const participantSet = new Set(participantIds);
+    if (!participantSet.has(req.userId)) {
+      return res.status(403).json({ message: 'Bu maçın katılımcısı değilsiniz.' });
+    }
+
+    const isGroupMatch = isGroupMatchRecord(m, listing);
+
     const changes = {};
     if (m.user1_id === req.userId) changes.u1_approved = true;
-    else if (m.user2_id === req.userId) changes.u2_approved = true;
-    else return res.status(403).json({ message: 'Bu maçın katılımcısı değilsiniz.' });
+    else changes.u2_approved = true;
 
     const bothApproved =
       (m.user1_id === req.userId ? true : m.u1_approved) &&
-      (m.user2_id === req.userId ? true : m.u2_approved);
+      (m.user1_id === req.userId ? m.u2_approved : true);
 
     if (bothApproved) {
       changes.status = 'COMPLETED';
       changes.completed_at = new Date().toISOString();
-      const u1 = await userById(m.user1_id);
-      const u2 = await userById(m.user2_id);
-      if (u1) await db.update('users', u1.id, {
-        total_matches: (u1.total_matches || 0) + 1,
-        total_points: (u1.total_points || 0) + 10,
-      });
-      if (u2) await db.update('users', u2.id, {
-        total_matches: (u2.total_matches || 0) + 1,
-        total_points: (u2.total_points || 0) + 10,
-      });
-      if (u1) await pushNotification({
-        userId: u1.id, type: 'MATCH_COMPLETED',
-        title: '⭐ Değerlendirme Zamanı!',
-        body: `${u2?.name || 'Rakibin'} maçı oynadığını onayladı`,
-        relatedId: m.id, senderName: u2?.name,
-      });
-      if (u2) await pushNotification({
-        userId: u2.id, type: 'MATCH_COMPLETED',
-        title: '⭐ Değerlendirme Zamanı!',
-        body: `${u1?.name || 'Rakibin'} maçı oynadığını onayladı`,
-        relatedId: m.id, senderName: u1?.name,
-      });
-    } else {
-      const awaitingId = req.userId === m.user1_id ? m.user2_id : m.user1_id;
+
+      const rewardUserIds = isGroupMatch
+        ? participantIds
+        : [m.user1_id, m.user2_id].filter(Boolean);
+
+      const users = await Promise.all([...new Set(rewardUserIds)].map(userById));
+      for (const user of users) {
+        if (!user) continue;
+        await db.update('users', user.id, {
+          total_matches: (user.total_matches || 0) + 1,
+          total_points: (user.total_points || 0) + 10,
+        });
+      }
+
       const approver = await userById(req.userId);
-      await pushNotification({
-        userId: awaitingId, type: 'MATCH_STATUS_CHANGED',
-        title: '⚽ Maçı Oynadınız mı?',
-        body: `${approver?.name || 'Rakibin'} maçı oynadığını onayladı`,
-        relatedId: m.id, senderId: req.userId,
-        senderName: approver?.name, senderAvatar: approver?.avatar_url,
-      });
+      for (const user of users) {
+        if (!user) continue;
+        await pushNotification({
+          userId: user.id,
+          type: 'MATCH_COMPLETED',
+          title: '⭐ Değerlendirme Zamanı!',
+          body: isGroupMatch
+            ? 'Grup maçı tamamlandı. Katılımcıları değerlendirebilirsiniz.'
+            : `${approver?.name || 'Rakibin'} maçı oynadığını onayladı`,
+          relatedId: m.id,
+          senderId: req.userId,
+          senderName: approver?.name,
+          senderAvatar: approver?.avatar_url,
+        });
+      }
+    } else {
+      const approver = await userById(req.userId);
+      const awaitingIds = [];
+
+      if (isGroupMatch) {
+        if (req.userId === m.user1_id) {
+          for (const participantId of participantIds) {
+            if (participantId && participantId !== m.user1_id) awaitingIds.push(participantId);
+          }
+        } else {
+          awaitingIds.push(m.user1_id);
+        }
+      } else {
+        awaitingIds.push(req.userId === m.user1_id ? m.user2_id : m.user1_id);
+      }
+
+      for (const awaitingId of [...new Set(awaitingIds.filter(Boolean))]) {
+        await pushNotification({
+          userId: awaitingId,
+          type: 'MATCH_STATUS_CHANGED',
+          title: '⚽ Maçı Oynadınız mı?',
+          body: `${approver?.name || 'Rakibin'} maçı oynadığını onayladı`,
+          relatedId: m.id,
+          senderId: req.userId,
+          senderName: approver?.name,
+          senderAvatar: approver?.avatar_url,
+        });
+      }
     }
 
     const updated = await db.update('matches', m.id, changes);
@@ -1650,8 +1881,16 @@ matchesRouter.post('/:id/otp/request', async (req, res) => {
   try {
     const m = await db.findById('matches', req.params.id);
     if (!m) return res.status(404).json({ message: 'Maç bulunamadı.' });
-    if (req.userId !== m.user1_id && req.userId !== m.user2_id)
+
+    const listing = m.listing_id ? await listingById(m.listing_id) : null;
+    const participantIds = await getMatchParticipantIds(m, listing);
+    const participantSet = new Set(participantIds);
+    if (!participantSet.has(req.userId))
       return res.status(403).json({ message: 'Bu maçın katılımcısı değilsiniz.' });
+
+    if (m.status === 'COMPLETED' || m.status === 'CANCELLED') {
+      return res.status(400).json({ message: 'Bu maç için OTP gönderilemez.' });
+    }
 
     const code = String(Math.floor(100000 + Math.random() * 900000));
     const expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
@@ -1660,14 +1899,20 @@ matchesRouter.post('/:id/otp/request', async (req, res) => {
       code, expires_at: expiresAt, used_at: null,
     });
 
-    const otherId = req.userId === m.user1_id ? m.user2_id : m.user1_id;
+    let otherId = req.userId === m.user1_id ? m.user2_id : m.user1_id;
+    if (req.userId === m.user1_id && isGroupMatchRecord(m, listing)) {
+      otherId = participantIds.find(userId => userId && userId !== m.user1_id) || m.user2_id;
+    }
+
     const requester = await userById(req.userId);
-    await pushNotification({
-      userId: otherId, type: 'MATCH_OTP_REQUESTED',
-      title: '🔐 Doğrulama Kodu İstendi',
-      body: `${requester?.name || 'Rakibin'} maç doğrulaması için kod istedi.`,
-      relatedId: m.id, senderId: req.userId,
-    });
+    if (otherId) {
+      await pushNotification({
+        userId: otherId, type: 'MATCH_OTP_REQUESTED',
+        title: '🔐 Doğrulama Kodu İstendi',
+        body: `${requester?.name || 'Rakibin'} maç doğrulaması için kod istedi.`,
+        relatedId: m.id, senderId: req.userId,
+      });
+    }
 
     res.json({ message: 'Doğrulama kodu oluşturuldu.', devCode: code, expiresAt });
   } catch (e) { res.status(500).json({ message: e.message }); }
@@ -1680,6 +1925,12 @@ matchesRouter.post('/:id/otp/verify', async (req, res) => {
 
     const m = await db.findById('matches', req.params.id);
     if (!m) return res.status(404).json({ message: 'Maç bulunamadı.' });
+
+    const listing = m.listing_id ? await listingById(m.listing_id) : null;
+    const participantIds = await getMatchParticipantIds(m, listing);
+    if (!participantIds.includes(req.userId)) {
+      return res.status(403).json({ message: 'Bu maçın katılımcısı değilsiniz.' });
+    }
 
     const client = db.raw();
     const { data: otps } = await client.from('otps').select('*')
@@ -1701,13 +1952,20 @@ matchesRouter.post('/:id/noshow', async (req, res) => {
   try {
     const m = await db.findById('matches', req.params.id);
     if (!m) return res.status(404).json({ message: 'Maç bulunamadı.' });
-    if (req.userId !== m.user1_id && req.userId !== m.user2_id)
+
+    const listing = m.listing_id ? await listingById(m.listing_id) : null;
+    const participantIds = await getMatchParticipantIds(m, listing);
+    if (!participantIds.includes(req.userId))
       return res.status(403).json({ message: 'Bu maçın katılımcısı değilsiniz.' });
 
     const already = await db.findOne('noshows', { match_id: m.id, reporter_id: req.userId });
     if (already) return res.status(409).json({ message: 'Bu maç için zaten rapor ettiniz.' });
 
-    const reportedId = req.userId === m.user1_id ? m.user2_id : m.user1_id;
+    let reportedId = req.userId === m.user1_id ? m.user2_id : m.user1_id;
+    if (req.userId === m.user1_id && isGroupMatchRecord(m, listing)) {
+      reportedId = participantIds.find(userId => userId && userId !== m.user1_id) || m.user2_id;
+    }
+
     await db.insert('noshows', { id: uuid(), match_id: m.id, reporter_id: req.userId, reported_id: reportedId });
 
     const reported = await userById(reportedId);
@@ -3313,25 +3571,90 @@ app.get('/api/aktivitelerim', authMiddleware, async (req, res) => {
     }
 
     // ── 3. My matches (last 20 — not unlimited!) ──
-    const { data: matchData } = await client.from('matches').select('*')
-      .or(`user1_id.eq.${req.userId},user2_id.eq.${req.userId}`)
-      .order('created_at', { ascending: false })
-      .limit(5);
-
-    const mArr = matchData || [];
-    // Batch: users + listings + sports for matches
-    const mUserIds = new Set();
-    const mListingIds = new Set();
-    for (const m of mArr) {
-      mUserIds.add(m.user1_id); mUserIds.add(m.user2_id);
-      if (m.listing_id) mListingIds.add(m.listing_id);
-    }
-    const [mUsersArr, mListingsArr] = await Promise.all([
-      mUserIds.size > 0 ? client.from('users').select('*').in('id', [...mUserIds]).then(r => r.data || []) : [],
-      mListingIds.size > 0 ? client.from('listings').select('*').in('id', [...mListingIds]).then(r => r.data || []) : [],
+    const [homeDirectMatchesRes, homeAcceptedListingsRes] = await Promise.all([
+      client.from('matches').select('*')
+        .or(`user1_id.eq.${req.userId},user2_id.eq.${req.userId}`)
+        .order('created_at', { ascending: false }),
+      client.from('interests').select('listing_id')
+        .eq('user_id', req.userId)
+        .eq('status', 'ACCEPTED'),
     ]);
-    const mUsersMap = new Map(mUsersArr.map(u => [u.id, u]));
+
+    const mArrAll = [];
+    const mSeenIds = new Set();
+    for (const row of (homeDirectMatchesRes.data || [])) {
+      if (!row?.id || mSeenIds.has(row.id)) continue;
+      mSeenIds.add(row.id);
+      mArrAll.push(row);
+    }
+
+    const homeAcceptedListingIds = [...new Set((homeAcceptedListingsRes.data || [])
+      .map(row => row.listing_id)
+      .filter(Boolean))];
+
+    if (homeAcceptedListingIds.length > 0) {
+      const { data: homeGroupMatches } = await client.from('matches').select('*')
+        .eq('source', 'GROUP_LISTING')
+        .in('listing_id', homeAcceptedListingIds)
+        .order('created_at', { ascending: false });
+
+      for (const row of (homeGroupMatches || [])) {
+        if (!row?.id || mSeenIds.has(row.id)) continue;
+        mSeenIds.add(row.id);
+        mArrAll.push(row);
+      }
+    }
+
+    const mArr = mArrAll
+      .sort((a, b) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime())
+      .slice(0, 5);
+
+    const mListingIds = [...new Set(mArr.map(m => m.listing_id).filter(Boolean))];
+    const mGroupListingIds = [...new Set(mArr
+      .filter(m => String(m.source || '').toUpperCase() === 'GROUP_LISTING')
+      .map(m => m.listing_id)
+      .filter(Boolean))];
+
+    const [mListingsArr, mAcceptedRows] = await Promise.all([
+      mListingIds.length > 0 ? client.from('listings').select('*').in('id', mListingIds).then(r => r.data || []) : [],
+      mGroupListingIds.length > 0
+        ? client.from('interests').select('listing_id,user_id')
+          .in('listing_id', mGroupListingIds)
+          .eq('status', 'ACCEPTED')
+          .then(r => r.data || [])
+        : [],
+    ]);
+
     const mListingsMap = new Map(mListingsArr.map(l => [l.id, l]));
+    const mAcceptedByListing = new Map();
+    for (const row of mAcceptedRows) {
+      if (!row?.listing_id || !row.user_id) continue;
+      if (!mAcceptedByListing.has(row.listing_id)) mAcceptedByListing.set(row.listing_id, new Set());
+      mAcceptedByListing.get(row.listing_id).add(row.user_id);
+    }
+
+    const mUserIds = new Set();
+    const mParticipantIdsByMatch = new Map();
+    for (const m of mArr) {
+      const listing = m.listing_id ? mListingsMap.get(m.listing_id) : null;
+      const participantIds = new Set([m.user1_id, m.user2_id].filter(Boolean));
+      if (isGroupMatchRecord(m, listing) && listing?.id) {
+        if (listing.user_id) participantIds.add(listing.user_id);
+        const acceptedSet = mAcceptedByListing.get(listing.id);
+        if (acceptedSet) {
+          for (const userId of acceptedSet) participantIds.add(userId);
+        }
+      }
+      const list = [...participantIds];
+      mParticipantIdsByMatch.set(m.id, list);
+      for (const userId of list) mUserIds.add(userId);
+    }
+
+    const mUsersArr = mUserIds.size > 0
+      ? (await client.from('users').select('*').in('id', [...mUserIds])).data || []
+      : [];
+    const mUsersMap = new Map(mUsersArr.map(u => [u.id, u]));
+
     const mSportIds = new Set(mListingsArr.filter(l => l.sport_id).map(l => l.sport_id));
     const mSportsArr = mSportIds.size > 0
       ? (await client.from('sports').select('*').in('id', [...mSportIds])).data || []
@@ -3339,12 +3662,24 @@ app.get('/api/aktivitelerim', authMiddleware, async (req, res) => {
     const mSportsMap = new Map(mSportsArr.map(s => [s.id, s]));
 
     const enrichedMatches = mArr.map(m => {
-      const u1 = mUsersMap.get(m.user1_id);
-      const u2 = mUsersMap.get(m.user2_id);
       const listing = m.listing_id ? mListingsMap.get(m.listing_id) : null;
       const sport = listing?.sport_id ? mSportsMap.get(listing.sport_id) : null;
+      const participantIds = mParticipantIdsByMatch.get(m.id) || [m.user1_id, m.user2_id].filter(Boolean);
+      const displayUser2Id = pickDisplayUser2IdForViewer({
+        match: m,
+        participantIds,
+        viewerId: req.userId,
+      });
+      const u1 = mUsersMap.get(m.user1_id);
+      const u2 = mUsersMap.get(displayUser2Id) || mUsersMap.get(m.user2_id);
       return {
         ...toCamel(m), source: m.source || 'LISTING',
+        user2Id: displayUser2Id,
+        isGroupMatch: isGroupMatchRecord(m, listing),
+        participantCount: participantIds.length,
+        participants: participantIds
+          .map(userId => safeUser(mUsersMap.get(userId)))
+          .filter(Boolean),
         user1: u1 ? { id: u1.id, name: u1.name, avatarUrl: u1.avatar_url } : null,
         user2: u2 ? { id: u2.id, name: u2.name, avatarUrl: u2.avatar_url } : null,
         listing: listing ? { id: listing.id, type: listing.type, sport: sport ? toCamel(sport) : null } : null,
@@ -3357,7 +3692,7 @@ app.get('/api/aktivitelerim', authMiddleware, async (req, res) => {
 
 app.post('/api/ratings', authMiddleware, async (req, res) => {
   try {
-    const { matchId, score, comment } = req.body;
+    const { matchId, score, comment, rateeId: requestedRateeId } = req.body;
     if (!matchId || score == null) return res.status(400).json({ message: 'matchId ve score gerekli.' });
 
     const s = parseInt(score, 10);
@@ -3366,10 +3701,29 @@ app.post('/api/ratings', authMiddleware, async (req, res) => {
     const m = await db.findById('matches', matchId);
     if (!m) return res.status(404).json({ message: 'Maç bulunamadı.' });
     if (m.status !== 'COMPLETED') return res.status(400).json({ message: 'Yalnızca tamamlanan maçlar değerlendirilebilir.' });
-    if (req.userId !== m.user1_id && req.userId !== m.user2_id) return res.status(403).json({ message: 'Bu maçın katılımcısı değilsiniz.' });
 
-    const rateeId = req.userId === m.user1_id ? m.user2_id : m.user1_id;
     const listing = await listingById(m.listing_id);
+    const participantIds = await getMatchParticipantIds(m, listing);
+    const isGroupMatch = isGroupMatchRecord(m, listing);
+    if (!participantIds.includes(req.userId)) return res.status(403).json({ message: 'Bu maçın katılımcısı değilsiniz.' });
+
+    let rateeId;
+    if (isGroupMatch) {
+      if (requestedRateeId && requestedRateeId !== req.userId && participantIds.includes(requestedRateeId)) {
+        rateeId = requestedRateeId;
+      } else if (req.userId === m.user1_id) {
+        rateeId = participantIds.find(userId => userId && userId !== req.userId) || m.user2_id;
+      } else {
+        rateeId = m.user1_id;
+      }
+    } else {
+      rateeId = req.userId === m.user1_id ? m.user2_id : m.user1_id;
+    }
+
+    if (!rateeId || rateeId === req.userId) {
+      return res.status(400).json({ message: 'Geçerli bir değerlendirme hedefi bulunamadı.' });
+    }
+
     const sportId = listing?.sport_id || null;
 
     // Check for existing rating: per sport per user pair (NOT per match)
@@ -4176,6 +4530,8 @@ async function runEcosystemTick(eco) {
     listing.accepted_count = newAccepted; // Update in-memory reference
 
     let matchCreated = false;
+    let matchedParticipantIds = [];
+
     if (effectiveMaxParticipants <= 2) {
       const matchId = 'match_' + uuid();
       try {
@@ -4192,20 +4548,56 @@ async function runEcosystemTick(eco) {
         });
         stats.newMatches++;
         matchCreated = true;
+        matchedParticipantIds = [listing.user_id, interest.user_id].filter(Boolean);
       } catch (matchErr) {
         console.error(`Match insert error (${listing.id}/${interest.id}):`, matchErr.message);
+      }
+    } else if (isFull && listingType === 'PARTNER') {
+      try {
+        const acceptedParticipantIds = await getListingAcceptedParticipantIds(listing);
+        matchedParticipantIds = acceptedParticipantIds;
+
+        const existingGroupMatch = await db.findOne('matches', {
+          listing_id: listing.id,
+          source: 'GROUP_LISTING',
+        });
+
+        if (!existingGroupMatch) {
+          const anchorParticipantId = acceptedParticipantIds.find(userId => userId && userId !== listing.user_id) || interest.user_id;
+          await db.insert('matches', {
+            id: 'match_' + uuid(),
+            listing_id: listing.id,
+            source: 'GROUP_LISTING',
+            user1_id: listing.user_id,
+            user2_id: anchorParticipantId,
+            status: 'SCHEDULED',
+            u1_approved: false,
+            u2_approved: false,
+            scheduled_at: listing.date || null,
+            completed_at: null,
+          });
+          stats.newMatches++;
+          matchCreated = true;
+        }
+      } catch (groupMatchErr) {
+        console.error(`Group match insert error (${listing.id}/${interest.id}):`, groupMatchErr.message);
       }
     }
     stats.newAcceptances++;
 
     // Keep user total_matches aligned with real match records only.
     if (matchCreated) {
-      const [u1, u2] = await Promise.all([
-        userById(listing.user_id),
-        userById(interest.user_id),
-      ]);
-      if (u1) await db.update('users', u1.id, { total_matches: (u1.total_matches || 0) + 1 });
-      if (u2) await db.update('users', u2.id, { total_matches: (u2.total_matches || 0) + 1 });
+      const rewardIds = [...new Set((matchedParticipantIds.length > 0
+        ? matchedParticipantIds
+        : [listing.user_id, interest.user_id]
+      ).filter(Boolean))];
+
+      for (const userId of rewardIds) {
+        const user = await userById(userId);
+        if (user) {
+          await db.update('users', user.id, { total_matches: (user.total_matches || 0) + 1 });
+        }
+      }
     }
   }
 
