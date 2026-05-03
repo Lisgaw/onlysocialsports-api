@@ -3279,6 +3279,7 @@ ecosystemRouter.post('/', async (req, res) => {
 
     let totalBots = 0, totalListings = 0;
     const ecosystemIds = [];
+    const createdEcos = [];
 
     for (const city of cities) {
       const cc = city.countryCode || countryCode;
@@ -3289,7 +3290,7 @@ ecosystemRouter.post('/', async (req, res) => {
 
       // Create ecosystem record
       const ecoId = 'eco_' + uuid();
-      await db.insert('bot_ecosystems', {
+      const createdEco = await db.insert('bot_ecosystems', {
         id: ecoId,
         scope,
         country_code: cc,
@@ -3305,6 +3306,7 @@ ecosystemRouter.post('/', async (req, res) => {
         total_listings: 0,
         total_matches: 0,
       });
+      createdEcos.push(createdEco);
       ecosystemIds.push(ecoId);
 
       // Create bots (mostly female ~70%) — batch insert (tek Supabase çağrısı)
@@ -3438,6 +3440,20 @@ ecosystemRouter.post('/', async (req, res) => {
       });
     }
 
+    // Auto-bootstrap for newly created ecosystems so they immediately join
+    // both sports and social cycles without waiting for the next cron run.
+    const bootstrap = [];
+    if (createdEcos.length > 0 && createdEcos.length <= 3) {
+      for (const eco of createdEcos) {
+        try {
+          const r = await runEcosystemTick(eco);
+          bootstrap.push({ ecoId: eco.id, cityName: eco.city_name, ...r });
+        } catch (err) {
+          bootstrap.push({ ecoId: eco.id, cityName: eco.city_name, error: err.message });
+        }
+      }
+    }
+
     res.json({
       success: true,
       message: `${cities.length} şehirde ${totalBots} bot + ${totalListings} ilan oluşturuldu.`,
@@ -3447,6 +3463,7 @@ ecosystemRouter.post('/', async (req, res) => {
         totalBots,
         totalListings,
         sports: selectedSports.map(s => `${s.icon || ''} ${s.name}`),
+        autoBootstrap: bootstrap,
       },
     });
   } catch (e) {
@@ -3873,17 +3890,31 @@ async function runEcosystemTick(eco) {
         ? botAutomation.translateSportName(botSport.id, botLocale, botSport.name)
         : botSport.name
         : null;
-      const content = botAutomation.generateBotSocialPost({
-        locale: botLocale, sportName, cityName: bot.city || eco.city_name, botName: bot.name,
-      });
+      const socialListing = botAutomation.generateBotSocialListing
+        ? botAutomation.generateBotSocialListing({
+            locale: botLocale,
+            sportName,
+            cityName: bot.city || eco.city_name,
+            botName: bot.name,
+          })
+        : {
+            kind: 'SPORT',
+            title: null,
+            content: botAutomation.generateBotSocialPost({
+              locale: botLocale,
+              sportName,
+              cityName: bot.city || eco.city_name,
+              botName: bot.name,
+            }),
+          };
       postRows.push({
         id: 'post_' + uuid(),
         user_id: bot.id,
         post_type: 'SOCIAL_LISTING',
-        content,
-        title: null,
+        content: socialListing.content,
+        title: socialListing.title || null,
         image_url: null,
-        sport_id: botSport ? botSport.id : null,
+        sport_id: socialListing.kind === 'TOPIC' ? null : (botSport ? botSport.id : null),
         city_id: null,
         city_name: bot.city || eco.city_name || null,
         district_id: null,
