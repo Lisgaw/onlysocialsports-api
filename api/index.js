@@ -4175,35 +4175,47 @@ async function runEcosystemTick(eco) {
     await db.update('listings', listing.id, listingUpdates);
     listing.accepted_count = newAccepted; // Update in-memory reference
 
-    if ((listing.max_participants || 2) <= 2) {
+    let matchCreated = false;
+    if (effectiveMaxParticipants <= 2) {
       const matchId = 'match_' + uuid();
-      await db.insert('matches', {
-        id: matchId,
-        listing_id: listing.id,
-        source: 'LISTING',
-        user1_id: listing.user_id,
-        user2_id: interest.user_id,
-        status: 'SCHEDULED',
-        u1_approved: false, u2_approved: false,
-        scheduled_at: listing.date || null,
-        completed_at: null,
-      });
-      stats.newMatches++;
+      try {
+        await db.insert('matches', {
+          id: matchId,
+          listing_id: listing.id,
+          source: 'LISTING',
+          user1_id: listing.user_id,
+          user2_id: interest.user_id,
+          status: 'SCHEDULED',
+          u1_approved: false, u2_approved: false,
+          scheduled_at: listing.date || null,
+          completed_at: null,
+        });
+        stats.newMatches++;
+        matchCreated = true;
+      } catch (matchErr) {
+        console.error(`Match insert error (${listing.id}/${interest.id}):`, matchErr.message);
+      }
     }
     stats.newAcceptances++;
 
-    // Update bot match stats
-    await db.raw().from('users').update({ total_matches: db.raw().rpc ? 1 : 1 }).eq('id', listing.user_id);
-    const u1 = await userById(listing.user_id);
-    if (u1) await db.update('users', u1.id, { total_matches: (u1.total_matches || 0) + 1 });
-    const u2 = await userById(interest.user_id);
-    if (u2) await db.update('users', u2.id, { total_matches: (u2.total_matches || 0) + 1 });
+    // Keep user total_matches aligned with real match records only.
+    if (matchCreated) {
+      const [u1, u2] = await Promise.all([
+        userById(listing.user_id),
+        userById(interest.user_id),
+      ]);
+      if (u1) await db.update('users', u1.id, { total_matches: (u1.total_matches || 0) + 1 });
+      if (u2) await db.update('users', u2.id, { total_matches: (u2.total_matches || 0) + 1 });
+    }
   }
 
   // 3. RATINGS — Complete scheduled matches and rate each other
+  const botMatchFilters = botIds
+    .flatMap(id => [`user1_id.eq.${id}`, `user2_id.eq.${id}`])
+    .join(',');
   const { data: scheduledMatches } = await client.from('matches').select('*')
     .eq('status', 'SCHEDULED')
-    .or(botIds.map(id => `user1_id.eq.${id}`).join(','));
+    .or(botMatchFilters);
 
   for (const m of (scheduledMatches || [])) {
     if (!botIdSet.has(m.user1_id) || !botIdSet.has(m.user2_id)) continue;
