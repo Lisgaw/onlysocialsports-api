@@ -946,11 +946,16 @@ listingsRouter.use(authMiddleware);
 
 listingsRouter.get('/', async (req, res) => {
   try {
-    const { sport, city, district, type, level, gender, userId, page = 1, pageSize = 20 } = req.query;
+    const { sport, city, district, type, level, gender, userId, countryCode, country_code, page = 1, pageSize = 20 } = req.query;
     const pg = Number(page);
     const ps = Math.min(50, Number(pageSize));
     const skip = (pg - 1) * ps;
     const nowIso = new Date().toISOString();
+    const countryFilter = typeof countryCode === 'string'
+      ? countryCode
+      : (typeof country_code === 'string' ? country_code : null);
+    const normalizedCountry = countryFilter ? String(countryFilter).trim().toUpperCase() : '';
+    const hasCountryFilter = /^[A-Z]{2,3}$/.test(normalizedCountry);
 
     const client = db.raw();
     let q = client.from('listings').select('*')
@@ -960,8 +965,17 @@ listingsRouter.get('/', async (req, res) => {
 
     q = q.or(`date.is.null,date.gte.${nowIso}`);
     if (sport) q = q.or(`sport_id.eq.${sport},sport_name.eq.${sport}`);
-    if (city)  q = q.or(`city_id.eq.${city},city_name.eq.${city}`);
-    if (district) q = q.eq('district_id', district);
+    if (city) {
+      const cityText = String(city).trim();
+      if (cityText) q = q.ilike('city_name', `%${cityText}%`);
+    }
+    if (district) {
+      const districtText = String(district).trim();
+      if (districtText) q = q.ilike('district_name', `%${districtText}%`);
+    }
+    if (hasCountryFilter) {
+      q = q.or(`country_code.eq.${normalizedCountry},country_code.is.null`);
+    }
     if (type)  q = q.eq('type', type);
     if (level) q = q.eq('level', level);
     if (gender && gender !== 'ANY') q = q.or(`gender.eq.${gender},gender.eq.ANY`);
@@ -971,9 +985,36 @@ listingsRouter.get('/', async (req, res) => {
     const { data, error } = await q;
     if (error) return res.status(500).json({ message: error.message });
 
+    let rows = data || [];
+    if (hasCountryFilter && rows.length > 0) {
+      const userIdsMissingCountry = [...new Set(
+        rows
+          .filter(r => !r.country_code && r.user_id)
+          .map(r => r.user_id)
+      )];
+
+      const userCountryById = new Map();
+      if (userIdsMissingCountry.length > 0) {
+        const { data: userRows } = await client
+          .from('users')
+          .select('id,country_code')
+          .in('id', userIdsMissingCountry);
+        for (const u of (userRows || [])) {
+          userCountryById.set(u.id, String(u.country_code || '').toUpperCase());
+        }
+      }
+
+      rows = rows.filter(row => {
+        const direct = String(row.country_code || '').toUpperCase();
+        if (direct) return direct === normalizedCountry;
+        const fromOwner = userCountryById.get(row.user_id) || '';
+        return fromOwner === normalizedCountry;
+      });
+    }
+
     res.json({
       success: true,
-      data: (data || []).map(toCamel),
+      data: rows.map(toCamel),
       pagination: { page: pg, hasNext: (data || []).length >= ps }
     });
   } catch (e) { res.status(500).json({ message: e.message }); }
@@ -1055,6 +1096,7 @@ listingsRouter.post('/', contentFilter('title', 'description'), async (req, res)
       sport_name: sport?.name || null,
       city_id: null,
       city_name: body.cityName || null,
+      country_code: (body.countryCode || user?.country_code || null),
       district_id: null,
       district_name: body.districtName || null,
       venue_id: body.venueId || null,
@@ -2290,18 +2332,43 @@ postsRouter.get('/', async (req, res) => {
     const pg = Number(page);
     const ps = Math.min(50, Number(pageSize));
     const skip = (pg - 1) * ps;
+    const normalizedCountry = countryCode ? String(countryCode).trim().toUpperCase() : '';
+    const hasCountryFilter = /^[A-Z]{2,3}$/.test(normalizedCountry);
 
     const client = db.raw();
     let q = client.from('posts').select('*').order('created_at', { ascending: false });
     if (postType) q = q.eq('post_type', postType);
     if (cityId) q = q.eq('city_id', cityId);
     if (cityName) q = q.ilike('city_name', `%${cityName}%`);
-    if (countryCode) q = q.eq('country_code', countryCode);
+    if (hasCountryFilter) q = q.or(`country_code.eq.${normalizedCountry},country_code.is.null`);
     if (userId) q = q.eq('user_id', userId);
     q = q.range(skip, skip + ps - 1);
 
     const { data } = await q;
-    const posts = data || [];
+    let posts = data || [];
+    if (hasCountryFilter && posts.length > 0) {
+      const userIdsMissingCountry = [...new Set(
+        posts
+          .filter(p => !p.country_code && p.user_id)
+          .map(p => p.user_id)
+      )];
+      const userCountryById = new Map();
+      if (userIdsMissingCountry.length > 0) {
+        const { data: userRows } = await client
+          .from('users')
+          .select('id,country_code')
+          .in('id', userIdsMissingCountry);
+        for (const u of (userRows || [])) {
+          userCountryById.set(u.id, String(u.country_code || '').toUpperCase());
+        }
+      }
+      posts = posts.filter(post => {
+        const direct = String(post.country_code || '').toUpperCase();
+        if (direct) return direct === normalizedCountry;
+        const fromOwner = userCountryById.get(post.user_id) || '';
+        return fromOwner === normalizedCountry;
+      });
+    }
     if (posts.length === 0) {
       return res.json({ success: true, data: [], pagination: { page: pg, hasNext: false } });
     }
@@ -2385,6 +2452,7 @@ postsRouter.post('/', contentFilter('content', 'title'), async (req, res) => {
       title: postType === 'SOCIAL_LISTING' ? (body.title || '').trim() : null,
       image_url: body.imageUrl || null,
       sport_id: body.sportId || null,
+      country_code: (body.countryCode || user?.country_code || null),
       city_id: null, city_name: body.cityName || null,
       district_id: null,
     });
@@ -3677,6 +3745,7 @@ ecosystemRouter.post('/', async (req, res) => {
           description: botAutomation.generateListingDesc({ name: bot.name, sport: sport.name, locale, city: city.name }),
           sport_id: sport.id, sport_name: sport.name,
           city_id: persistCityId, city_name: city.name,
+          country_code: cc,
           district_id: null, district_name: null,
           venue_id: null, venue_name: null,
           level: ['BEGINNER', 'INTERMEDIATE', 'ADVANCED'][Math.floor(Math.random() * 3)],
@@ -4150,6 +4219,7 @@ async function runEcosystemTick(eco) {
         description: botAutomation ? botAutomation.generateListingDesc({ name: bot.name, sport: sport.name, locale, city: eco.city_name }) : null,
         sport_id: sport.id, sport_name: sport.name,
         city_id: persistEcoCityId, city_name: eco.city_name,
+        country_code: eco.country_code || bot.country_code || null,
         district_id: null, district_name: null,
         venue_id: null, venue_name: null,
         level: ['BEGINNER', 'INTERMEDIATE', 'ADVANCED'][Math.floor(Math.random() * 3)],
@@ -4221,6 +4291,7 @@ async function runEcosystemTick(eco) {
         title: socialListing.title || null,
         image_url: null,
         sport_id: socialListing.kind === 'TOPIC' ? null : (botSport ? botSport.id : null),
+        country_code: bot.country_code || eco.country_code || null,
         city_id: null,
         city_name: bot.city || eco.city_name || null,
         district_id: null,
