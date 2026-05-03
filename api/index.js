@@ -248,13 +248,20 @@ const LEGACY_SPV_MARKER = '|SPV|';
 
 function decodeLegacyAllowMessages(rawValue) {
   const raw = String(rawValue || '').trim();
-  if (!raw) return { whoCanMessage: 'EVERYONE', socialPlatformVisibility: null };
+  if (!raw) {
+    return {
+      whoCanMessage: 'EVERYONE',
+      socialPlatformVisibility: null,
+      socialDefaultVisibility: null,
+    };
+  }
 
   const markerIdx = raw.indexOf(LEGACY_SPV_MARKER);
   if (markerIdx < 0) {
     return {
       whoCanMessage: legacyVisibilityToModern(raw, 'EVERYONE'),
       socialPlatformVisibility: null,
+      socialDefaultVisibility: null,
     };
   }
 
@@ -262,29 +269,47 @@ function decodeLegacyAllowMessages(rawValue) {
   const encodedPart = raw.slice(markerIdx + LEGACY_SPV_MARKER.length);
 
   let socialPlatformVisibility = null;
+  let socialDefaultVisibility = null;
   if (encodedPart) {
     try {
       const json = Buffer.from(encodedPart, 'base64').toString('utf8');
       const parsed = JSON.parse(json);
-      socialPlatformVisibility = parsed && typeof parsed === 'object' ? parsed : null;
+      if (parsed && typeof parsed === 'object') {
+        socialDefaultVisibility = normalizeVisibility(parsed._default, 'EVERYONE');
+        const map = {};
+        for (const p of SOCIAL_PLATFORMS) {
+          if (!Object.prototype.hasOwnProperty.call(parsed, p)) continue;
+          map[p] = normalizeVisibility(parsed[p], socialDefaultVisibility);
+        }
+        socialPlatformVisibility = map;
+      } else {
+        socialPlatformVisibility = null;
+      }
     } catch {
       socialPlatformVisibility = null;
+      socialDefaultVisibility = null;
     }
   }
 
   return {
     whoCanMessage: legacyVisibilityToModern(basePart, 'EVERYONE'),
     socialPlatformVisibility,
+    socialDefaultVisibility,
   };
 }
 
-function encodeLegacyAllowMessages(whoCanMessage, socialPlatformVisibility) {
+function encodeLegacyAllowMessages(whoCanMessage, socialPlatformVisibility, socialDefaultVisibility = 'EVERYONE') {
   const base = modernVisibilityToLegacy(whoCanMessage, 'generic');
+  const defaultVisibility = normalizeVisibility(socialDefaultVisibility, 'EVERYONE');
   const compact = {};
 
+  if (defaultVisibility !== 'EVERYONE') {
+    compact._default = defaultVisibility;
+  }
+
   for (const p of SOCIAL_PLATFORMS) {
-    const v = normalizeVisibility(socialPlatformVisibility?.[p], 'EVERYONE');
-    if (v !== 'EVERYONE') compact[p] = v;
+    const v = normalizeVisibility(socialPlatformVisibility?.[p], defaultVisibility);
+    if (v !== defaultVisibility) compact[p] = v;
   }
 
   if (Object.keys(compact).length === 0) return base;
@@ -301,7 +326,8 @@ function buildLegacyPrivacyPatch(input = {}) {
     show_social_links: normalizeVisibility(input.socialLinksVisibility, 'EVERYONE') !== 'NOBODY',
     allow_messages_from: encodeLegacyAllowMessages(
       input.whoCanMessage || input.allowMessages,
-      input.socialPlatformVisibility
+      input.socialPlatformVisibility,
+      input.socialLinksVisibility
     ),
     updated_at: new Date().toISOString(),
   };
@@ -329,6 +355,24 @@ async function getPrivacy(userId) {
   }
 
   const decodedLegacy = decodeLegacyAllowMessages(row.allow_messages_from);
+  const legacyMap = decodedLegacy.socialPlatformVisibility || {};
+  const legacyMapSize = Object.keys(legacyMap).length;
+
+  let legacySocialDefault = decodedLegacy.socialDefaultVisibility;
+  if (!legacySocialDefault) {
+    legacySocialDefault = row.show_social_links === false ? 'NOBODY' : 'EVERYONE';
+
+    // Backward compatibility for old encoded payloads (without _default marker):
+    // if global legacy value says NOBODY but encoded map is partial, missing keys
+    // were previously intended to stay EVERYONE.
+    if (
+      legacySocialDefault === 'NOBODY' &&
+      legacyMapSize > 0 &&
+      legacyMapSize < SOCIAL_PLATFORMS.length
+    ) {
+      legacySocialDefault = 'EVERYONE';
+    }
+  }
 
   // Legacy schema fallback: map flat columns into modern privacy shape.
   return normalizePrivacy({
@@ -338,10 +382,10 @@ async function getPrivacy(userId) {
     showSports: row.show_sports !== false,
     showOnLeaderboard: row.show_statistics !== false,
     isPrivateProfile: legacyVisibilityToModern(row.profile_visibility, 'EVERYONE') === 'NOBODY',
-    socialLinksVisibility: row.show_social_links === false ? 'NOBODY' : 'EVERYONE',
+    socialLinksVisibility: legacySocialDefault,
     whoCanMessage: decodedLegacy.whoCanMessage,
     allowMessages: decodedLegacy.whoCanMessage,
-    socialPlatformVisibility: decodedLegacy.socialPlatformVisibility || {},
+    socialPlatformVisibility: legacyMap,
   });
 }
 
