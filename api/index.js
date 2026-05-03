@@ -2637,9 +2637,13 @@ settingsRouter.put('/privacy', async (req, res) => {
     const merged = normalizePrivacy({ ...current, ...req.body });
     const existing = await db.findOne('user_privacy', { user_id: req.userId });
     if (existing) {
-      await db.update('user_privacy', existing.id, { settings: merged, updated_at: new Date().toISOString() });
+      await db.updateWhere(
+        'user_privacy',
+        { user_id: req.userId },
+        { settings: merged, updated_at: new Date().toISOString() }
+      );
     } else {
-      await db.insert('user_privacy', { id: uuid(), user_id: req.userId, settings: merged });
+      await db.insert('user_privacy', { user_id: req.userId, settings: merged });
     }
     if (merged.isPrivateProfile !== undefined) {
       await db.update('users', req.userId, { is_private: merged.isPrivateProfile }).catch(() => {});
