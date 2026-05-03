@@ -4253,6 +4253,7 @@ adminStatsRouter.delete('/matches/:id', async (req, res) => {
 });
 
 // Mount Supabase-backed admin routes BEFORE the legacy in-memory admin.js
+app.use('/api/admin/ecosystems', ecosystemRouter);
 app.use('/api/admin', adminStatsRouter);
 
 // Legacy admin routes (in-memory store — only works in Docker/dev)
