@@ -3609,7 +3609,9 @@ ecosystemRouter.post('/', async (req, res) => {
     // botsPerGroup * groupsPerCity = total bots per city (if botsPerGroup sent from Flutter)
     const totalBotsPerCity = botsPerGroup ? Math.min(40, (parseInt(botsPerGroup) || 8) * (parseInt(groupsPerCity) || 1)) : (parseInt(botsPerCity) || 6);
     const perCity = Math.min(40, Math.max(4, totalBotsPerCity));
-    const maxPart = Math.min(6, Math.max(3, parseInt(maxParticipants) || 4));
+    const maxPart = listingType === 'RIVAL'
+      ? 2
+      : Math.min(6, Math.max(3, parseInt(maxParticipants) || 4));
     const hourlyApps = Math.min(5, Math.max(1, parseInt(hourlyApplications) || 2));
 
     // Determine cities to animate
@@ -3789,7 +3791,7 @@ ecosystemRouter.post('/', async (req, res) => {
           gender: 'ANY',
           date: futureDate.toISOString(),
           image_urls: [],
-          max_participants: maxPart,
+          max_participants: lType === 'RIVAL' ? 2 : maxPart,
           accepted_count: 0,
           status: 'ACTIVE',
           age_min: null, age_max: null,
@@ -3949,9 +3951,14 @@ ecosystemRouter.patch('/:id', async (req, res) => {
 
     const { status, hourlyApplications, maxParticipants, sportIds, listingType } = req.body;
     const changes = {};
+    const nextListingType = listingType || eco.listing_type;
     if (status && ['ACTIVE', 'PAUSED'].includes(status)) changes.status = status;
     if (hourlyApplications) changes.hourly_applications = Math.min(5, Math.max(1, parseInt(hourlyApplications)));
-    if (maxParticipants) changes.max_participants = Math.min(6, Math.max(3, parseInt(maxParticipants)));
+    if (nextListingType === 'RIVAL') {
+      changes.max_participants = 2;
+    } else if (maxParticipants) {
+      changes.max_participants = Math.min(6, Math.max(3, parseInt(maxParticipants)));
+    }
     if (sportIds) changes.sport_ids = sportIds;
     if (listingType) changes.listing_type = listingType;
 
@@ -4119,9 +4126,22 @@ async function runEcosystemTick(eco) {
     const listing = (activeListings || []).find(l => l.id === interest.listing_id);
     if (!listing || !botIdSet.has(listing.user_id)) continue;
 
+    const listingType = String(listing.type || '').toUpperCase();
+    if (listingType === 'RIVAL' && (listing.max_participants || 0) !== 2) {
+      try {
+        await db.update('listings', listing.id, { max_participants: 2 });
+        listing.max_participants = 2;
+      } catch (quotaFixErr) {
+        console.error(`RIVAL quota normalize error (${listing.id}):`, quotaFixErr.message);
+      }
+    }
+
     // Check capacity
     const currentAccepted = listing.accepted_count || 0;
-    const slotsNeeded = Math.max(1, (listing.max_participants || 4) - 1);
+    const effectiveMaxParticipants = listingType === 'RIVAL'
+      ? 2
+      : (listing.max_participants || 4);
+    const slotsNeeded = Math.max(1, effectiveMaxParticipants - 1);
     if (currentAccepted >= slotsNeeded) continue;
 
     // Accept
@@ -4262,7 +4282,7 @@ async function runEcosystemTick(eco) {
         gender: 'ANY',
         date: futureDate.toISOString ? futureDate.toISOString() : futureDate,
         image_urls: [],
-        max_participants: eco.max_participants || 4,
+        max_participants: lType === 'RIVAL' ? 2 : (eco.max_participants || 4),
         accepted_count: 0,
         status: 'ACTIVE',
         age_min: null, age_max: null,
