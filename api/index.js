@@ -118,6 +118,38 @@ function normalizePrivacy(input = {}) {
   };
 }
 
+function legacyVisibilityToModern(v, fallback = 'EVERYONE') {
+  const raw = String(v || '').toUpperCase();
+  if (raw === 'PUBLIC' || raw === 'EVERYONE') return 'EVERYONE';
+  if (raw === 'FOLLOWERS_ONLY' || raw === 'FOLLOWERS' || raw === 'FRIENDS') return 'FOLLOWERS';
+  if (raw === 'PRIVATE' || raw === 'NOBODY' || raw === 'NONE') return 'NOBODY';
+  return fallback;
+}
+
+function modernVisibilityToLegacy(v, kind = 'generic') {
+  const modern = normalizeVisibility(v, 'EVERYONE');
+  if (kind === 'profile') {
+    if (modern === 'FOLLOWERS') return 'FOLLOWERS_ONLY';
+    if (modern === 'NOBODY') return 'PRIVATE';
+    return 'PUBLIC';
+  }
+  if (modern === 'FOLLOWERS') return 'FOLLOWERS';
+  if (modern === 'NOBODY') return 'NOBODY';
+  return 'EVERYONE';
+}
+
+function buildLegacyPrivacyPatch(input = {}) {
+  return {
+    profile_visibility: modernVisibilityToLegacy(input.profileVisibility, 'profile'),
+    show_online_status: input.showOnlineStatus !== false,
+    show_sports: input.showSports !== false,
+    show_location: input.showLocation !== false,
+    show_social_links: normalizeVisibility(input.socialLinksVisibility, 'EVERYONE') !== 'NOBODY',
+    allow_messages_from: modernVisibilityToLegacy(input.whoCanMessage || input.allowMessages, 'generic'),
+    updated_at: new Date().toISOString(),
+  };
+}
+
 const privacyDefaults = () => normalizePrivacy({});
 
 async function canViewerSee(viewerId, ownerId, visibility) {
@@ -133,8 +165,24 @@ async function canViewerSee(viewerId, ownerId, visibility) {
 async function getPrivacy(userId) {
   const row = await db.findOne('user_privacy', { user_id: userId });
   if (!row) return privacyDefaults();
-  const settings = row.settings || {};
-  return normalizePrivacy(typeof settings === 'string' ? JSON.parse(settings) : settings);
+  const hasSettingsColumn = Object.prototype.hasOwnProperty.call(row, 'settings');
+  if (hasSettingsColumn && row.settings) {
+    const settings = row.settings;
+    return normalizePrivacy(typeof settings === 'string' ? JSON.parse(settings) : settings);
+  }
+
+  // Legacy schema fallback: map flat columns into modern privacy shape.
+  return normalizePrivacy({
+    profileVisibility: legacyVisibilityToModern(row.profile_visibility, 'EVERYONE'),
+    showOnlineStatus: row.show_online_status !== false,
+    showLocation: row.show_location !== false,
+    showSports: row.show_sports !== false,
+    showOnLeaderboard: row.show_statistics !== false,
+    isPrivateProfile: legacyVisibilityToModern(row.profile_visibility, 'EVERYONE') === 'NOBODY',
+    socialLinksVisibility: row.show_social_links === false ? 'NOBODY' : 'EVERYONE',
+    whoCanMessage: legacyVisibilityToModern(row.allow_messages_from, 'EVERYONE'),
+    allowMessages: legacyVisibilityToModern(row.allow_messages_from, 'EVERYONE'),
+  });
 }
 
 async function pushNotification(n) {
@@ -2636,14 +2684,40 @@ settingsRouter.put('/privacy', async (req, res) => {
     const current = await getPrivacy(req.userId);
     const merged = normalizePrivacy({ ...current, ...req.body });
     const existing = await db.findOne('user_privacy', { user_id: req.userId });
+    const legacyPatch = buildLegacyPrivacyPatch(merged);
+
     if (existing) {
-      await db.updateWhere(
-        'user_privacy',
-        { user_id: req.userId },
-        { settings: merged, updated_at: new Date().toISOString() }
-      );
+      let saved = false;
+      if (Object.prototype.hasOwnProperty.call(existing, 'settings')) {
+        try {
+          await db.updateWhere(
+            'user_privacy',
+            { user_id: req.userId },
+            { settings: merged, updated_at: new Date().toISOString() }
+          );
+          saved = true;
+        } catch (settingsErr) {
+          const msg = String(settingsErr?.message || '').toLowerCase();
+          if (!msg.includes('settings')) throw settingsErr;
+        }
+      }
+      if (!saved) {
+        await db.updateWhere('user_privacy', { user_id: req.userId }, legacyPatch);
+      }
     } else {
-      await db.insert('user_privacy', { user_id: req.userId, settings: merged });
+      try {
+        await db.insert('user_privacy', { user_id: req.userId, settings: merged });
+      } catch (insertErr) {
+        const msg = String(insertErr?.message || '').toLowerCase();
+        if (!msg.includes('settings')) throw insertErr;
+        await db.insert('user_privacy', {
+          user_id: req.userId,
+          ...legacyPatch,
+          show_last_seen: true,
+          show_statistics: true,
+          show_age: true,
+        });
+      }
     }
     if (merged.isPrivateProfile !== undefined) {
       await db.update('users', req.userId, { is_private: merged.isPrivateProfile }).catch(() => {});
