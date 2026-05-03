@@ -1449,7 +1449,6 @@ listingsRouter.patch('/:id/interests/:responseId', async (req, res) => {
 
           const existingGroupMatch = await db.findOne('matches', {
             listing_id: listing.id,
-            source: 'GROUP_LISTING',
           });
           if (existingGroupMatch) {
             groupMatch = existingGroupMatch;
@@ -1458,7 +1457,7 @@ listingsRouter.patch('/:id/interests/:responseId', async (req, res) => {
             groupMatch = {
               id: 'match_' + uuid(),
               listing_id: listing.id,
-              source: 'GROUP_LISTING',
+              source: 'LISTING',
               user1_id: listing.user_id,
               user2_id: anchorParticipantId,
               status: 'SCHEDULED',
@@ -1614,12 +1613,25 @@ matchesRouter.get('/', async (req, res) => {
       .filter(Boolean))];
 
     if (acceptedListingIds.length > 0) {
-      const { data: groupMatches } = await client.from('matches').select('*')
-        .eq('source', 'GROUP_LISTING')
-        .in('listing_id', acceptedListingIds)
-        .order('created_at', { ascending: false });
+      const { data: groupListingRows } = await client.from('listings').select('id,type,max_participants')
+        .in('id', acceptedListingIds)
+        .eq('type', 'PARTNER')
+        .gt('max_participants', 2);
 
-      for (const row of (groupMatches || [])) {
+      const eligibleGroupListingIds = [...new Set((groupListingRows || []).map(row => row.id).filter(Boolean))];
+      const { data: groupListingMatches } = eligibleGroupListingIds.length > 0
+        ? await client.from('matches').select('*')
+          .in('listing_id', eligibleGroupListingIds)
+          .order('created_at', { ascending: false })
+        : { data: [] };
+
+      const latestByListing = new Map();
+      for (const row of (groupListingMatches || [])) {
+        if (!row?.listing_id) continue;
+        if (!latestByListing.has(row.listing_id)) latestByListing.set(row.listing_id, row);
+      }
+
+      for (const row of latestByListing.values()) {
         if (!row?.id || seenMatchIds.has(row.id)) continue;
         seenMatchIds.add(row.id);
         allMatches.push(row);
@@ -1636,24 +1648,23 @@ matchesRouter.get('/', async (req, res) => {
     }
 
     const listingIds = [...new Set(matches.map(m => m.listing_id).filter(Boolean))];
-    const groupListingIds = [...new Set(matches
-      .filter(m => String(m.source || '').toUpperCase() === 'GROUP_LISTING')
-      .map(m => m.listing_id)
-      .filter(Boolean))];
-
-    const [listingsArr, acceptedByListingArr] = await Promise.all([
-      listingIds.length > 0
-        ? client.from('listings').select('*').in('id', listingIds).then(r => r.data || [])
-        : [],
-      groupListingIds.length > 0
-        ? client.from('interests').select('listing_id,user_id')
-          .in('listing_id', groupListingIds)
-          .eq('status', 'ACCEPTED')
-          .then(r => r.data || [])
-        : [],
-    ]);
+    const listingsArr = listingIds.length > 0
+      ? (await client.from('listings').select('*').in('id', listingIds)).data || []
+      : [];
 
     const listingsMap = new Map(listingsArr.map(l => [l.id, l]));
+    const groupListingIds = [...new Set(matches
+      .map(m => m.listing_id)
+      .filter(listingId => {
+        if (!listingId) return false;
+        return isPartnerGroupListing(listingsMap.get(listingId));
+      }))];
+
+    const acceptedByListingArr = groupListingIds.length > 0
+      ? (await client.from('interests').select('listing_id,user_id')
+        .in('listing_id', groupListingIds)
+        .eq('status', 'ACCEPTED')).data || []
+      : [];
 
     const acceptedByListingMap = new Map();
     for (const row of acceptedByListingArr) {
@@ -3593,12 +3604,25 @@ app.get('/api/aktivitelerim', authMiddleware, async (req, res) => {
       .filter(Boolean))];
 
     if (homeAcceptedListingIds.length > 0) {
-      const { data: homeGroupMatches } = await client.from('matches').select('*')
-        .eq('source', 'GROUP_LISTING')
-        .in('listing_id', homeAcceptedListingIds)
-        .order('created_at', { ascending: false });
+      const { data: homeGroupListingRows } = await client.from('listings').select('id,type,max_participants')
+        .in('id', homeAcceptedListingIds)
+        .eq('type', 'PARTNER')
+        .gt('max_participants', 2);
 
+      const eligibleHomeGroupListingIds = [...new Set((homeGroupListingRows || []).map(row => row.id).filter(Boolean))];
+      const { data: homeGroupMatches } = eligibleHomeGroupListingIds.length > 0
+        ? await client.from('matches').select('*')
+          .in('listing_id', eligibleHomeGroupListingIds)
+          .order('created_at', { ascending: false })
+        : { data: [] };
+
+      const homeLatestByListing = new Map();
       for (const row of (homeGroupMatches || [])) {
+        if (!row?.listing_id) continue;
+        if (!homeLatestByListing.has(row.listing_id)) homeLatestByListing.set(row.listing_id, row);
+      }
+
+      for (const row of homeLatestByListing.values()) {
         if (!row?.id || mSeenIds.has(row.id)) continue;
         mSeenIds.add(row.id);
         mArrAll.push(row);
@@ -3610,22 +3634,24 @@ app.get('/api/aktivitelerim', authMiddleware, async (req, res) => {
       .slice(0, 5);
 
     const mListingIds = [...new Set(mArr.map(m => m.listing_id).filter(Boolean))];
-    const mGroupListingIds = [...new Set(mArr
-      .filter(m => String(m.source || '').toUpperCase() === 'GROUP_LISTING')
-      .map(m => m.listing_id)
-      .filter(Boolean))];
-
-    const [mListingsArr, mAcceptedRows] = await Promise.all([
-      mListingIds.length > 0 ? client.from('listings').select('*').in('id', mListingIds).then(r => r.data || []) : [],
-      mGroupListingIds.length > 0
-        ? client.from('interests').select('listing_id,user_id')
-          .in('listing_id', mGroupListingIds)
-          .eq('status', 'ACCEPTED')
-          .then(r => r.data || [])
-        : [],
-    ]);
+    const mListingsArr = mListingIds.length > 0
+      ? (await client.from('listings').select('*').in('id', mListingIds)).data || []
+      : [];
 
     const mListingsMap = new Map(mListingsArr.map(l => [l.id, l]));
+    const mGroupListingIds = [...new Set(mArr
+      .map(m => m.listing_id)
+      .filter(listingId => {
+        if (!listingId) return false;
+        return isPartnerGroupListing(mListingsMap.get(listingId));
+      }))];
+
+    const mAcceptedRows = mGroupListingIds.length > 0
+      ? (await client.from('interests').select('listing_id,user_id')
+        .in('listing_id', mGroupListingIds)
+        .eq('status', 'ACCEPTED')).data || []
+      : [];
+
     const mAcceptedByListing = new Map();
     for (const row of mAcceptedRows) {
       if (!row?.listing_id || !row.user_id) continue;
@@ -4559,7 +4585,6 @@ async function runEcosystemTick(eco) {
 
         const existingGroupMatch = await db.findOne('matches', {
           listing_id: listing.id,
-          source: 'GROUP_LISTING',
         });
 
         if (!existingGroupMatch) {
@@ -4567,7 +4592,7 @@ async function runEcosystemTick(eco) {
           await db.insert('matches', {
             id: 'match_' + uuid(),
             listing_id: listing.id,
-            source: 'GROUP_LISTING',
+            source: 'LISTING',
             user1_id: listing.user_id,
             user2_id: anchorParticipantId,
             status: 'SCHEDULED',
