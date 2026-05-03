@@ -3697,10 +3697,10 @@ async function runEcosystemTick(eco) {
 
       if (existingRating) {
         // Update existing rating (edit, not duplicate)
-        const newScore = 3 + Math.floor(Math.random() * 3); // 3-5
+        const newScore = 4 + Math.floor(Math.random() * 2); // 4-5
         await db.update('ratings', existingRating.id, { score: newScore, match_id: m.id });
       } else {
-        const score = 3 + Math.floor(Math.random() * 3); // 3-5
+        const score = 4 + Math.floor(Math.random() * 2); // 4-5
         const comments = ['Harika partner! 🎾', 'Çok keyifli maçtı!', 'Tekrar oynamak isterim', 'Great game!', 'Super Spiel!', 'Отличная игра!'];
         await db.insert('ratings', {
           id: uuid(),
