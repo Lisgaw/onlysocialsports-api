@@ -138,6 +138,54 @@ function modernVisibilityToLegacy(v, kind = 'generic') {
   return 'EVERYONE';
 }
 
+const LEGACY_SPV_MARKER = '|SPV|';
+
+function decodeLegacyAllowMessages(rawValue) {
+  const raw = String(rawValue || '').trim();
+  if (!raw) return { whoCanMessage: 'EVERYONE', socialPlatformVisibility: null };
+
+  const markerIdx = raw.indexOf(LEGACY_SPV_MARKER);
+  if (markerIdx < 0) {
+    return {
+      whoCanMessage: legacyVisibilityToModern(raw, 'EVERYONE'),
+      socialPlatformVisibility: null,
+    };
+  }
+
+  const basePart = raw.slice(0, markerIdx);
+  const encodedPart = raw.slice(markerIdx + LEGACY_SPV_MARKER.length);
+
+  let socialPlatformVisibility = null;
+  if (encodedPart) {
+    try {
+      const json = Buffer.from(encodedPart, 'base64').toString('utf8');
+      const parsed = JSON.parse(json);
+      socialPlatformVisibility = parsed && typeof parsed === 'object' ? parsed : null;
+    } catch {
+      socialPlatformVisibility = null;
+    }
+  }
+
+  return {
+    whoCanMessage: legacyVisibilityToModern(basePart, 'EVERYONE'),
+    socialPlatformVisibility,
+  };
+}
+
+function encodeLegacyAllowMessages(whoCanMessage, socialPlatformVisibility) {
+  const base = modernVisibilityToLegacy(whoCanMessage, 'generic');
+  const compact = {};
+
+  for (const p of SOCIAL_PLATFORMS) {
+    const v = normalizeVisibility(socialPlatformVisibility?.[p], 'EVERYONE');
+    if (v !== 'EVERYONE') compact[p] = v;
+  }
+
+  if (Object.keys(compact).length === 0) return base;
+  const encoded = Buffer.from(JSON.stringify(compact), 'utf8').toString('base64');
+  return `${base}${LEGACY_SPV_MARKER}${encoded}`;
+}
+
 function buildLegacyPrivacyPatch(input = {}) {
   return {
     profile_visibility: modernVisibilityToLegacy(input.profileVisibility, 'profile'),
@@ -145,7 +193,10 @@ function buildLegacyPrivacyPatch(input = {}) {
     show_sports: input.showSports !== false,
     show_location: input.showLocation !== false,
     show_social_links: normalizeVisibility(input.socialLinksVisibility, 'EVERYONE') !== 'NOBODY',
-    allow_messages_from: modernVisibilityToLegacy(input.whoCanMessage || input.allowMessages, 'generic'),
+    allow_messages_from: encodeLegacyAllowMessages(
+      input.whoCanMessage || input.allowMessages,
+      input.socialPlatformVisibility
+    ),
     updated_at: new Date().toISOString(),
   };
 }
@@ -171,6 +222,8 @@ async function getPrivacy(userId) {
     return normalizePrivacy(typeof settings === 'string' ? JSON.parse(settings) : settings);
   }
 
+  const decodedLegacy = decodeLegacyAllowMessages(row.allow_messages_from);
+
   // Legacy schema fallback: map flat columns into modern privacy shape.
   return normalizePrivacy({
     profileVisibility: legacyVisibilityToModern(row.profile_visibility, 'EVERYONE'),
@@ -180,8 +233,9 @@ async function getPrivacy(userId) {
     showOnLeaderboard: row.show_statistics !== false,
     isPrivateProfile: legacyVisibilityToModern(row.profile_visibility, 'EVERYONE') === 'NOBODY',
     socialLinksVisibility: row.show_social_links === false ? 'NOBODY' : 'EVERYONE',
-    whoCanMessage: legacyVisibilityToModern(row.allow_messages_from, 'EVERYONE'),
-    allowMessages: legacyVisibilityToModern(row.allow_messages_from, 'EVERYONE'),
+    whoCanMessage: decodedLegacy.whoCanMessage,
+    allowMessages: decodedLegacy.whoCanMessage,
+    socialPlatformVisibility: decodedLegacy.socialPlatformVisibility || {},
   });
 }
 
