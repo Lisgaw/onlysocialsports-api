@@ -3853,9 +3853,12 @@ async function runEcosystemTick(eco) {
   // ~60% of bots post per tick if they haven't posted in the last 24 hours
   if (botAutomation) {
     const oneDayAgo = new Date(Date.now() - 24 * 3600000).toISOString();
-    // Fetch recent posts by these bots (last 24h) to skip already-posted bots
+    // Fetch recent SOCIAL_LISTING posts by these bots (last 24h) to skip already-posted bots
     const { data: recentBotPosts } = await client.from('posts')
-      .select('user_id').in('user_id', botIds).gte('created_at', oneDayAgo);
+      .select('user_id')
+      .eq('post_type', 'SOCIAL_LISTING')
+      .in('user_id', botIds)
+      .gte('created_at', oneDayAgo);
     const recentPostersSet = new Set((recentBotPosts || []).map(p => p.user_id));
 
     // Pick up to 4 bots that haven't posted yet today
