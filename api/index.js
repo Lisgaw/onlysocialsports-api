@@ -3102,17 +3102,37 @@ ecosystemRouter.use(async (req, res, next) => {
 ecosystemRouter.get('/', async (req, res) => {
   try {
     const ecosystems = await db.query('bot_ecosystems', { order: 'created_at', ascending: false });
-    const result = [];
-    for (const eco of ecosystems) {
-      const botCount = await db.count('users', { is_bot: true, city_id: eco.city_id || undefined });
-      const listingCount = eco.city_id
-        ? (await db.raw().from('listings').select('id', { count: 'exact', head: true })
-            .eq('city_id', eco.city_id).eq('status', 'ACTIVE')
-            .in('user_id', (await db.query('users', { select: 'id', filters: { is_bot: true, city_id: eco.city_id } })).map(u => u.id))
-          ).count || 0
-        : 0;
-      result.push({ ...toCamel(eco), botCount, activeListing: listingCount });
+    if (ecosystems.length === 0) return res.json({ data: [] });
+
+    // Batch: tüm bot kullanıcılarını tek sorguda çek, JS'te city_id'ye göre grupla
+    const allBotsRes = await db.raw().from('users').select('id, city_id').eq('is_bot', true);
+    const allBots = allBotsRes.data || [];
+
+    // city_id → bot count map + bot id set
+    const botCountByCity = {};
+    const botIdSet = new Set();
+    for (const u of allBots) {
+      botIdSet.add(u.id);
+      if (u.city_id) botCountByCity[u.city_id] = (botCountByCity[u.city_id] || 0) + 1;
     }
+
+    // Bot user ID'leriyle aktif ilanları tek sorguda çek (max 1000)
+    const listingCountByCity = {};
+    if (botIdSet.size > 0) {
+      const botIds = [...botIdSet].slice(0, 1000);
+      const allBotListingsRes = await db.raw().from('listings').select('user_id, city_id').eq('status', 'ACTIVE').in('user_id', botIds);
+      for (const l of (allBotListingsRes.data || [])) {
+        if (l.city_id) listingCountByCity[l.city_id] = (listingCountByCity[l.city_id] || 0) + 1;
+      }
+    }
+
+    const result = ecosystems.map(eco => ({
+      ...toCamel(eco),
+      botCount: eco.city_id ? (botCountByCity[eco.city_id] || 0) : 0,
+      activeListing: eco.city_id ? (listingCountByCity[eco.city_id] || 0) : 0,
+      activeListings: eco.city_id ? (listingCountByCity[eco.city_id] || 0) : 0,
+    }));
+
     res.json({ data: result });
   } catch (e) { res.status(500).json({ message: e.message }); }
 });
