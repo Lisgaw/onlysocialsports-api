@@ -3140,6 +3140,16 @@ async function getBotsForEcosystem(eco) {
   return [];
 }
 
+async function resolvePersistCityId(rawCityId) {
+  if (!rawCityId) return null;
+  try {
+    const city = await db.findById('cities', rawCityId);
+    return city ? city.id : null;
+  } catch {
+    return null;
+  }
+}
+
 const ecosystemRouter = express.Router();
 ecosystemRouter.use(authMiddleware);
 
@@ -3283,6 +3293,7 @@ ecosystemRouter.post('/', async (req, res) => {
 
     for (const city of cities) {
       const cc = city.countryCode || countryCode;
+      const persistCityId = await resolvePersistCityId(city.id);
 
       // Check if ecosystem already exists for this city
       const existing = await db.findOne('bot_ecosystems', { city_id: city.id, status: 'ACTIVE' });
@@ -3335,7 +3346,7 @@ ecosystemRouter.post('/', async (req, res) => {
           cover_url: null, phone: null,
           is_admin: false, is_bot: true, bot_persona: null,
           onboarding_done: true, user_type: 'USER',
-          city: city.name, city_id: city.id, country_code: cc,
+          city: city.name, city_id: persistCityId, country_code: cc,
           district: null, district_id: null,
           bio: botAutomation.generateBotBio({ locale, sportName: sport.name, cityName: city.name }),
           instagram: null, tiktok: null, facebook: null, twitter: null,
@@ -3391,7 +3402,7 @@ ecosystemRouter.post('/', async (req, res) => {
           title: botAutomation.generateListingDesc({ name: bot.name, sport: sport.name, locale, city: city.name }),
           description: botAutomation.generateListingDesc({ name: bot.name, sport: sport.name, locale, city: city.name }),
           sport_id: sport.id, sport_name: sport.name,
-          city_id: city.id, city_name: city.name,
+          city_id: persistCityId, city_name: city.name,
           district_id: null, district_name: null,
           venue_id: null, venue_name: null,
           level: ['BEGINNER', 'INTERMEDIATE', 'ADVANCED'][Math.floor(Math.random() * 3)],
@@ -3592,6 +3603,7 @@ ecosystemRouter.post('/:id/toggle-bots-privacy', async (req, res) => {
 // ── Ecosystem Tick Engine ───────────────────────────────────────────────────
 async function runEcosystemTick(eco) {
   const stats = { newApplications: 0, newAcceptances: 0, newMatches: 0, newRatings: 0, newListings: 0, newPosts: 0, newReactions: 0, newComments: 0 };
+  const persistEcoCityId = await resolvePersistCityId(eco.city_id);
 
   // Get all bots in this ecosystem (city_id format fallback + city_name fallback)
   let bots = await getBotsForEcosystem(eco);
@@ -3628,7 +3640,7 @@ async function runEcosystemTick(eco) {
           avatar_url: botAutomationFill.buildBotAvatarUrl({ gender, seed: `${bName}-${eco.city_id}-${sport.name}` }),
           cover_url: null, phone: null, is_admin: false, is_bot: true, bot_persona: null,
           onboarding_done: true, user_type: 'USER',
-          city: eco.city_name, city_id: eco.city_id, country_code: eco.country_code,
+          city: eco.city_name, city_id: persistEcoCityId, country_code: eco.country_code,
           district: null, district_id: null,
           bio: botAutomationFill.generateBotBio({ locale, sportName: sport.name, cityName: eco.city_name }),
           instagram: null, tiktok: null, facebook: null, twitter: null, youtube: null,
@@ -3843,7 +3855,7 @@ async function runEcosystemTick(eco) {
         title: botAutomation ? botAutomation.generateListingDesc({ name: bot.name, sport: sport.name, locale, city: eco.city_name }) : `${bot.name} - ${sport.name}`,
         description: botAutomation ? botAutomation.generateListingDesc({ name: bot.name, sport: sport.name, locale, city: eco.city_name }) : null,
         sport_id: sport.id, sport_name: sport.name,
-        city_id: eco.city_id, city_name: eco.city_name,
+        city_id: persistEcoCityId, city_name: eco.city_name,
         district_id: null, district_name: null,
         venue_id: null, venue_name: null,
         level: ['BEGINNER', 'INTERMEDIATE', 'ADVANCED'][Math.floor(Math.random() * 3)],
