@@ -82,6 +82,112 @@ const SOCIAL_PLATFORMS = [
   'instagram','tiktok','facebook','twitter','youtube','linkedin',
   'discord','twitch','snapchat','telegram','whatsapp','vk','litmatch'
 ];
+const BOT_SOCIAL_PLATFORM_POOL = ['instagram', 'youtube', 'telegram', 'vk', 'tiktok', 'twitter'];
+
+function hashText(seed = '') {
+  let h = 0;
+  const s = String(seed || '');
+  for (let i = 0; i < s.length; i++) {
+    h = (h << 5) - h + s.charCodeAt(i);
+    h |= 0;
+  }
+  return Math.abs(h);
+}
+
+function seededInt(seed, min, max) {
+  const lo = Number(min);
+  const hi = Number(max);
+  if (!Number.isFinite(lo) || !Number.isFinite(hi) || hi <= lo) return lo;
+  return lo + (hashText(seed) % (hi - lo + 1));
+}
+
+function normalizedHandleBase(name) {
+  const raw = String(name || '').replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+  return raw.length >= 3 ? raw : 'sportbot';
+}
+
+function buildBotSocialLinks({ botName, citySeed, countryCode, botIndex = 0, botId = '' }) {
+  const links = {};
+  for (const p of SOCIAL_PLATFORMS) links[p] = null;
+
+  const seedBase = `${botId}-${botName}-${citySeed}-${countryCode || ''}-${botIndex}`;
+  const base = normalizedHandleBase(botName);
+  const selectedPlatforms = [...BOT_SOCIAL_PLATFORM_POOL]
+    .sort((a, b) => hashText(`${seedBase}-${a}`) - hashText(`${seedBase}-${b}`))
+    .slice(0, 3);
+
+  for (const platform of selectedPlatforms) {
+    const suffix = seededInt(`${seedBase}-${platform}-suffix`, 100, 99999);
+    links[platform] = `${base}_${suffix}`.slice(0, 28);
+  }
+  return links;
+}
+
+function buildBotAudience({ botName, citySeed, countryCode, botIndex = 0, botId = '' }) {
+  const seedBase = `${botId}-${botName}-${citySeed}-${countryCode || ''}-${botIndex}`;
+  return {
+    followerCount: seededInt(`${seedBase}-followers`, 400, 500),
+    followingCount: seededInt(`${seedBase}-following`, 400, 500),
+  };
+}
+
+function countBotSocialLinks(row) {
+  let count = 0;
+  for (const p of SOCIAL_PLATFORMS) {
+    const v = row?.[p];
+    const hasValue = typeof v === 'string' ? v.trim().length > 0 : !!v;
+    if (hasValue) count++;
+  }
+  return count;
+}
+
+function buildBotPublicPersona({ botName, citySeed, countryCode, botIndex = 0, botId = '' }) {
+  const socialLinks = buildBotSocialLinks({ botName, citySeed, countryCode, botIndex, botId });
+  const audience = buildBotAudience({ botName, citySeed, countryCode, botIndex, botId });
+  return {
+    socialLinks,
+    followerCount: audience.followerCount,
+    followingCount: audience.followingCount,
+  };
+}
+
+function buildBotBaselinePatch({ bot, eco, botIndex = 0 }) {
+  const patch = {};
+  const seedCity = bot.city_id || eco.city_id || bot.city || eco.city_name || 'city';
+  const persona = buildBotPublicPersona({
+    botName: bot.name,
+    citySeed: seedCity,
+    countryCode: bot.country_code || eco.country_code,
+    botIndex,
+    botId: bot.id,
+  });
+
+  const followerCount = Number(bot.follower_count || 0);
+  if (followerCount < 400 || followerCount > 500) {
+    patch.follower_count = persona.followerCount;
+  }
+  const followingCount = Number(bot.following_count || 0);
+  if (followingCount < 400 || followingCount > 500) {
+    patch.following_count = persona.followingCount;
+  }
+
+  let socialCount = countBotSocialLinks(bot);
+  if (socialCount < 3) {
+    for (const platform of BOT_SOCIAL_PLATFORM_POOL) {
+      const existing = bot[platform];
+      const hasExisting = typeof existing === 'string' ? existing.trim().length > 0 : !!existing;
+      if (hasExisting) continue;
+
+      const candidate = persona.socialLinks[platform];
+      if (!candidate) continue;
+      patch[platform] = candidate;
+      socialCount++;
+      if (socialCount >= 3) break;
+    }
+  }
+
+  return patch;
+}
 
 function normalizeVisibility(v, fallback = 'EVERYONE') {
   const raw = String(v || '').toUpperCase();
@@ -1820,6 +1926,12 @@ usersRouter.post('/:id/follow', async (req, res) => {
 
 usersRouter.get('/:id/followers', async (req, res) => {
   try {
+    const targetUser = await userById(req.params.id);
+    if (!targetUser) return res.status(404).json({ message: 'Kullanıcı bulunamadı.' });
+    if (targetUser.is_bot && req.userId !== targetUser.id) {
+      return res.status(403).json({ message: 'Bot takip listesi gizlidir.' });
+    }
+
     const accepted = await db.query('follows', { filters: { following_id: req.params.id, status: 'accepted' } });
     const result = [];
     for (const f of accepted) {
@@ -1839,6 +1951,12 @@ usersRouter.get('/:id/followers', async (req, res) => {
 
 usersRouter.get('/:id/following', async (req, res) => {
   try {
+    const targetUser = await userById(req.params.id);
+    if (!targetUser) return res.status(404).json({ message: 'Kullanıcı bulunamadı.' });
+    if (targetUser.is_bot && req.userId !== targetUser.id) {
+      return res.status(403).json({ message: 'Bot takip listesi gizlidir.' });
+    }
+
     const accepted = await db.query('follows', { filters: { follower_id: req.params.id, status: 'accepted' } });
     const result = [];
     for (const f of accepted) {
@@ -3484,6 +3602,13 @@ ecosystemRouter.post('/', async (req, res) => {
         const sport = selectedSports[i % selectedSports.length];
         const botId = 'bot_' + uuid();
         const coords = botAutomation.estimateBotCoordinates({ citySeed: city.id, countryCode: cc });
+        const botPersona = buildBotPublicPersona({
+          botName: bName,
+          citySeed: city.id,
+          countryCode: cc,
+          botIndex: i,
+          botId,
+        });
 
         botRows.push({
           id: botId,
@@ -3498,16 +3623,16 @@ ecosystemRouter.post('/', async (req, res) => {
           city: city.name, city_id: persistCityId, country_code: cc,
           district: null, district_id: null,
           bio: botAutomation.generateBotBio({ locale, sportName: sport.name, cityName: city.name }),
-          instagram: null, tiktok: null, facebook: null, twitter: null,
-          youtube: null, linkedin: null, discord: null, twitch: null,
-          snapchat: null, telegram: null, whatsapp: null, vk: null, litmatch: null,
+          ...botPersona.socialLinks,
           sports: [{ id: sport.id, name: sport.name, icon: sport.icon }],
           level: ['BEGINNER', 'INTERMEDIATE', 'ADVANCED'][Math.floor(Math.random() * 3)],
           gender,
           preferred_time: null, preferred_style: null,
           birth_date: new Date(1992 + (i % 13), i % 12, 1 + (i % 28)).toISOString(),
           total_matches: 0, current_streak: 0, longest_streak: 0, total_points: 0,
-          follower_count: 0, following_count: 0, average_rating: 0, rating_count: 0,
+          follower_count: botPersona.followerCount,
+          following_count: botPersona.followingCount,
+          average_rating: 0, rating_count: 0,
           is_banned: false, no_show_count: 0, is_private: false,
           latitude: coords.latitude, longitude: coords.longitude,
           referral_code: `SP${Math.random().toString(36).slice(2, 8).toUpperCase()}`,
@@ -3782,6 +3907,13 @@ async function runEcosystemTick(eco) {
         const sport = fillSports[i % fillSports.length];
         const botId = 'bot_' + uuid();
         const coords = botAutomationFill.estimateBotCoordinates({ citySeed: eco.city_id, countryCode: eco.country_code });
+        const botPersona = buildBotPublicPersona({
+          botName: bName,
+          citySeed: eco.city_id || eco.city_name || 'city',
+          countryCode: eco.country_code,
+          botIndex: i,
+          botId,
+        });
         fillRows.push({
           id: botId, email: `bot_${nowMs}_fill_${i}_${eco.city_id.slice(0,6)}@sporpartner.internal`,
           name: bName, username: `bot_${bName.replace(/[^a-zA-Z0-9]/g,'').toLowerCase()}_fill_${(nowMs+i)%100000}`,
@@ -3792,15 +3924,15 @@ async function runEcosystemTick(eco) {
           city: eco.city_name, city_id: persistEcoCityId, country_code: eco.country_code,
           district: null, district_id: null,
           bio: botAutomationFill.generateBotBio({ locale, sportName: sport.name, cityName: eco.city_name }),
-          instagram: null, tiktok: null, facebook: null, twitter: null, youtube: null,
-          linkedin: null, discord: null, twitch: null, snapchat: null, telegram: null,
-          whatsapp: null, vk: null, litmatch: null,
+          ...botPersona.socialLinks,
           sports: [{ id: sport.id, name: sport.name, icon: sport.icon }],
           level: ['BEGINNER','INTERMEDIATE','ADVANCED'][Math.floor(Math.random()*3)],
           gender, preferred_time: null, preferred_style: null,
           birth_date: new Date(1992+(i%13), i%12, 1+(i%28)).toISOString(),
           total_matches: 0, current_streak: 0, longest_streak: 0, total_points: 0,
-          follower_count: 0, following_count: 0, average_rating: 0, rating_count: 0,
+          follower_count: botPersona.followerCount,
+          following_count: botPersona.followingCount,
+          average_rating: 0, rating_count: 0,
           is_banned: false, no_show_count: 0, is_private: false,
           latitude: coords.latitude, longitude: coords.longitude,
           referral_code: `SP${Math.random().toString(36).slice(2,8).toUpperCase()}`,
@@ -3817,6 +3949,19 @@ async function runEcosystemTick(eco) {
       bots = await getBotsForEcosystem(eco);
     }
     if (bots.length < 2) return stats;
+  }
+
+  // Keep old ecosystem bots realistic: 3 social links + 400-500 followers/following.
+  for (let i = 0; i < bots.length; i++) {
+    const bot = bots[i];
+    const baselinePatch = buildBotBaselinePatch({ bot, eco, botIndex: i });
+    if (Object.keys(baselinePatch).length === 0) continue;
+    try {
+      await db.update('users', bot.id, baselinePatch);
+      Object.assign(bot, baselinePatch);
+    } catch (baselineErr) {
+      console.error(`Bot baseline patch error (${bot.id}):`, baselineErr.message);
+    }
   }
 
   const botIds = bots.map(b => b.id);
