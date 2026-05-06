@@ -520,6 +520,72 @@ function isGroupMatchRecord(match, listing = null) {
   return isPartnerGroupListing(listing);
 }
 
+let hasMatchParticipantsTable = true;
+
+function isMissingRelationError(error, relationName) {
+  const message = String(error?.message || '').toLowerCase();
+  const details = String(error?.details || '').toLowerCase();
+  const relation = String(relationName || '').toLowerCase();
+  return error?.code === '42P01'
+    || message.includes('does not exist')
+    || details.includes('does not exist')
+    || message.includes(relation)
+    || details.includes(relation);
+}
+
+async function getPersistedParticipantsByMatch(matchIds = []) {
+  const ids = [...new Set((matchIds || []).filter(Boolean))];
+  const byMatch = new Map();
+  if (ids.length === 0 || !hasMatchParticipantsTable) return byMatch;
+
+  try {
+    const client = db.raw();
+    const { data } = await client.from('match_participants').select('match_id,user_id')
+      .in('match_id', ids);
+
+    for (const row of (data || [])) {
+      if (!row?.match_id || !row.user_id) continue;
+      if (!byMatch.has(row.match_id)) byMatch.set(row.match_id, new Set());
+      byMatch.get(row.match_id).add(row.user_id);
+    }
+    return byMatch;
+  } catch (error) {
+    if (isMissingRelationError(error, 'match_participants')) {
+      hasMatchParticipantsTable = false;
+      return new Map();
+    }
+    console.error('match_participants read error:', error.message || error);
+    return new Map();
+  }
+}
+
+async function persistMatchParticipants({ matchId, participantIds, ownerId = null }) {
+  const targetMatchId = String(matchId || '').trim();
+  const uniqueParticipantIds = [...new Set((participantIds || []).filter(Boolean))];
+  if (!targetMatchId || uniqueParticipantIds.length === 0 || !hasMatchParticipantsTable) return false;
+
+  try {
+    const client = db.raw();
+    await client.from('match_participants').delete().eq('match_id', targetMatchId);
+    await client.from('match_participants').insert(
+      uniqueParticipantIds.map(userId => ({
+        id: 'mp_' + uuid(),
+        match_id: targetMatchId,
+        user_id: userId,
+        role: userId === ownerId ? 'OWNER' : 'PARTICIPANT',
+      }))
+    );
+    return true;
+  } catch (error) {
+    if (isMissingRelationError(error, 'match_participants')) {
+      hasMatchParticipantsTable = false;
+      return false;
+    }
+    console.error('match_participants write error:', error.message || error);
+    return false;
+  }
+}
+
 async function getListingAcceptedParticipantIds(listing) {
   if (!listing || !listing.id) return [];
   const client = db.raw();
@@ -539,8 +605,17 @@ async function getMatchParticipantIds(match, listing = null) {
   const base = new Set([match?.user1_id, match?.user2_id].filter(Boolean));
   if (!match) return [...base];
 
+  const persistedByMatch = await getPersistedParticipantsByMatch([match.id]);
+  const persisted = persistedByMatch.get(match.id);
+  if (persisted) {
+    for (const userId of persisted) {
+      if (userId) base.add(userId);
+    }
+  }
+
   const targetListing = listing || (match.listing_id ? await listingById(match.listing_id) : null);
   if (!isGroupMatchRecord(match, targetListing)) return [...base];
+  if (persisted && persisted.size > 0) return [...base];
   if (!targetListing) return [...base];
 
   const listingParticipants = await getListingAcceptedParticipantIds(targetListing);
@@ -1408,6 +1483,11 @@ listingsRouter.patch('/:id/interests/:responseId', async (req, res) => {
           scheduled_at: listing.date || null, completed_at: null,
         };
         await db.insert('matches', match);
+        await persistMatchParticipants({
+          matchId: match.id,
+          participantIds: [listing.user_id, interest.user_id],
+          ownerId: listing.user_id,
+        });
       }
 
       // Update listing capacity
@@ -1467,6 +1547,14 @@ listingsRouter.patch('/:id/interests/:responseId', async (req, res) => {
               completed_at: null,
             };
             await db.insert('matches', groupMatch);
+          }
+
+          if (groupMatch && groupParticipantIds.length > 0) {
+            await persistMatchParticipants({
+              matchId: groupMatch.id,
+              participantIds: groupParticipantIds,
+              ownerId: listing.user_id,
+            });
           }
         }
 
@@ -1660,6 +1748,10 @@ matchesRouter.get('/', async (req, res) => {
         return isPartnerGroupListing(listingsMap.get(listingId));
       }))];
 
+    const persistedByMatch = await getPersistedParticipantsByMatch(
+      matches.map(m => m.id).filter(Boolean)
+    );
+
     const acceptedByListingArr = groupListingIds.length > 0
       ? (await client.from('interests').select('listing_id,user_id')
         .in('listing_id', groupListingIds)
@@ -1680,7 +1772,10 @@ matchesRouter.get('/', async (req, res) => {
       const isGroupMatch = isGroupMatchRecord(m, listing);
 
       const participantIds = new Set([m.user1_id, m.user2_id].filter(Boolean));
-      if (isGroupMatch && listing?.id) {
+      const persisted = persistedByMatch.get(m.id);
+      if (persisted && persisted.size > 0) {
+        for (const userId of persisted) participantIds.add(userId);
+      } else if (isGroupMatch && listing?.id) {
         if (listing.user_id) participantIds.add(listing.user_id);
         const acceptedSet = acceptedByListingMap.get(listing.id);
         if (acceptedSet) {
@@ -1691,6 +1786,21 @@ matchesRouter.get('/', async (req, res) => {
       const participantList = [...participantIds];
       participantIdsByMatch.set(m.id, participantList);
       for (const userId of participantList) userIds.add(userId);
+    }
+
+    const ratedByMeByMatch = new Map();
+    const matchIds = matches.map(m => m.id).filter(Boolean);
+    if (matchIds.length > 0) {
+      const { data: ratedRows } = await client.from('ratings')
+        .select('match_id,ratee_id')
+        .eq('rater_id', req.userId)
+        .in('match_id', matchIds);
+
+      for (const row of (ratedRows || [])) {
+        if (!row?.match_id || !row.ratee_id) continue;
+        if (!ratedByMeByMatch.has(row.match_id)) ratedByMeByMatch.set(row.match_id, new Set());
+        ratedByMeByMatch.get(row.match_id).add(row.ratee_id);
+      }
     }
 
     const usersArr = userIds.size > 0
@@ -1721,6 +1831,7 @@ matchesRouter.get('/', async (req, res) => {
         user2Id: displayUser2Id,
         isGroupMatch: isGroupMatchRecord(m, listing),
         participantCount: participantIds.length,
+        ratedByMeUserIds: [...(ratedByMeByMatch.get(m.id) || new Set())],
         participants: participantIds
           .map(userId => safeUser(usersMap.get(userId)))
           .filter(Boolean),
@@ -1763,6 +1874,12 @@ matchesRouter.get('/:id', async (req, res) => {
     const u1 = usersMap.get(m.user1_id) || await userById(m.user1_id);
     const u2 = usersMap.get(displayUser2Id) || usersMap.get(m.user2_id) || await userById(m.user2_id);
     const sport = listing?.sport_id ? await db.findById('sports', listing.sport_id) : null;
+    const { data: ratedRows } = await client.from('ratings')
+      .select('ratee_id')
+      .eq('match_id', m.id)
+      .eq('rater_id', req.userId);
+
+    const ratedByMeUserIds = [...new Set((ratedRows || []).map(row => row.ratee_id).filter(Boolean))];
 
     res.json({
       data: {
@@ -1770,6 +1887,7 @@ matchesRouter.get('/:id', async (req, res) => {
         user2Id: displayUser2Id,
         isGroupMatch: isGroupMatchRecord(m, listing),
         participantCount: participantIds.length,
+        ratedByMeUserIds,
         participants: participantIds
           .map(userId => safeUser(usersMap.get(userId)))
           .filter(Boolean),
@@ -2604,6 +2722,12 @@ challengesRouter.patch('/:id', async (req, res) => {
         scheduled_at: c.proposed_date_time,
       });
 
+      await persistMatchParticipants({
+        matchId,
+        participantIds: [c.sender_id, c.target_id],
+        ownerId: c.sender_id,
+      });
+
       await pushNotification({
         userId: c.sender_id, type: 'NEW_MATCH',
         title: '🎮 Eşleşme Sağlandı!',
@@ -2950,8 +3074,6 @@ postsRouter.get('/:id/comments', async (req, res) => {
     const postComments = await db.query('comments', {
       filters: { post_id: req.params.id }, order: 'created_at', ascending: true,
     });
-    if (postComments.length === 0) return res.json({ data: [] });
-
     // Batch: fetch all users and comment likes in parallel
     const commentIds = postComments.map(c => c.id);
     const userIds = [...new Set(postComments.map(c => c.user_id).filter(Boolean))];
@@ -3341,6 +3463,83 @@ app.get('/api/home-feed', authMiddleware, async (req, res) => {
   } catch (e) { res.status(500).json({ message: e.message }); }
 });
 
+async function pruneHistoricalMatches({ keepPerUser = 3 } = {}) {
+  const client = db.raw();
+  const terminalStatuses = ['COMPLETED', 'NO_SHOW'];
+  const { data: terminalMatches } = await client.from('matches').select('*')
+    .in('status', terminalStatuses)
+    .order('completed_at', { ascending: false, nullsFirst: false })
+    .order('created_at', { ascending: false });
+
+  const matches = terminalMatches || [];
+  if (matches.length === 0) {
+    return {
+      keptMatches: 0,
+      deletedMatches: 0,
+      deletedRatings: 0,
+      deletedOtps: 0,
+      deletedNoShows: 0,
+      deletedNotifications: 0,
+    };
+  }
+
+  const listingIds = [...new Set(matches.map(m => m.listing_id).filter(Boolean))];
+  const listingsArr = listingIds.length > 0
+    ? (await client.from('listings').select('id,type,max_participants,user_id').in('id', listingIds)).data || []
+    : [];
+  const listingsMap = new Map(listingsArr.map(row => [row.id, row]));
+
+  const participantsByMatch = new Map();
+  await Promise.all(matches.map(async (match) => {
+    const listing = match.listing_id ? listingsMap.get(match.listing_id) : null;
+    const participantIds = await getMatchParticipantIds(match, listing);
+    participantsByMatch.set(match.id, participantIds);
+  }));
+
+  const keepCounts = new Map();
+  const keepIds = new Set();
+
+  for (const match of matches) {
+    const participantIds = participantsByMatch.get(match.id) || [];
+    const shouldKeep = participantIds.some(userId => (keepCounts.get(userId) || 0) < keepPerUser);
+    if (!shouldKeep) continue;
+
+    keepIds.add(match.id);
+    for (const userId of participantIds) {
+      keepCounts.set(userId, (keepCounts.get(userId) || 0) + 1);
+    }
+  }
+
+  const pruneIds = matches.map(m => m.id).filter(id => !keepIds.has(id));
+  if (pruneIds.length === 0) {
+    return {
+      keptMatches: keepIds.size,
+      deletedMatches: 0,
+      deletedRatings: 0,
+      deletedOtps: 0,
+      deletedNoShows: 0,
+      deletedNotifications: 0,
+    };
+  }
+
+  const [deletedRatings, deletedOtps, deletedNoShows, deletedNotifications, deletedMatches] = await Promise.all([
+    client.from('ratings').delete({ count: 'exact' }).in('match_id', pruneIds),
+    client.from('otps').delete({ count: 'exact' }).in('match_id', pruneIds),
+    client.from('noshows').delete({ count: 'exact' }).in('match_id', pruneIds),
+    client.from('notifications').delete({ count: 'exact' }).in('related_id', pruneIds),
+    client.from('matches').delete({ count: 'exact' }).in('id', pruneIds),
+  ]);
+
+  return {
+    keptMatches: keepIds.size,
+    deletedMatches: deletedMatches.count || 0,
+    deletedRatings: deletedRatings.count || 0,
+    deletedOtps: deletedOtps.count || 0,
+    deletedNoShows: deletedNoShows.count || 0,
+    deletedNotifications: deletedNotifications.count || 0,
+  };
+}
+
 // ══════════════════════════════════════════════════════════════════════════════
 //  CRON JOBS — Hobby plan uyumlu bakım endpoint'leri
 // ══════════════════════════════════════════════════════════════════════════════
@@ -3357,13 +3556,35 @@ app.get('/api/cron/cleanup-expired', async (req, res) => {
     const now = new Date().toISOString();
 
     // 1. Süresi dolan ilanları sil (expires_at < now)
-    const { data: expired } = await client.from('listings').select('id')
+    const { data: expired } = await client.from('listings').select('id,user_id,title')
       .lt('expires_at', now).eq('status', 'ACTIVE');
     const expiredIds = (expired || []).map(l => l.id);
+    const listingById = new Map((expired || []).map(l => [l.id, l]));
 
     let deletedListings = 0;
+    let autoRejectedInterests = 0;
     if (expiredIds.length > 0) {
-      // İlgili interests'leri önce sil
+      const { data: pendingInterests } = await client.from('interests')
+        .select('id,listing_id,user_id,status')
+        .in('listing_id', expiredIds)
+        .eq('status', 'PENDING');
+
+      for (const interest of (pendingInterests || [])) {
+        const targetListing = listingById.get(interest.listing_id);
+        await pushNotification({
+          userId: interest.user_id,
+          type: 'RESPONSE_REJECTED',
+          title: 'Başvuru otomatik reddedildi',
+          body: targetListing?.title
+            ? `"${targetListing.title}" ilanının süresi dolduğu için başvurunuz otomatik reddedildi.`
+            : 'İlanın süresi dolduğu için başvurunuz otomatik reddedildi.',
+          relatedId: interest.listing_id,
+          senderId: targetListing?.user_id || null,
+        }).catch(() => {});
+        autoRejectedInterests++;
+      }
+
+      // İlgili interests'leri kalıcı sil
       await client.from('interests').delete().in('listing_id', expiredIds);
       const { count } = await client.from('listings').delete({ count: 'exact' }).in('id', expiredIds);
       deletedListings = count || 0;
@@ -3380,11 +3601,16 @@ app.get('/api/cron/cleanup-expired', async (req, res) => {
     // 4. Zamanı geçmiş ama henüz tamamlanmamış maçlar için tek seferlik hatırlatma üret
     const reminderNotifications = await generateMatchReminders({ now });
 
+    // 5. Her kullanıcı için yalnızca son 3 tarihsel maçı tut, eskileri kalıcı sil
+    const matchPruneStats = await pruneHistoricalMatches({ keepPerUser: 3 });
+
     res.json({
       message: 'Cleanup completed',
       deletedListings, deletedTokens: deletedTokens || 0,
       deletedRefreshTokens: deletedRefresh || 0,
+      autoRejectedInterests,
       reminderNotifications,
+      matchPruneStats,
       timestamp: now,
     });
   } catch (e) { res.status(500).json({ message: e.message }); }
@@ -3646,6 +3872,10 @@ app.get('/api/aktivitelerim', authMiddleware, async (req, res) => {
         return isPartnerGroupListing(mListingsMap.get(listingId));
       }))];
 
+    const persistedHomeByMatch = await getPersistedParticipantsByMatch(
+      mArr.map(m => m.id).filter(Boolean)
+    );
+
     const mAcceptedRows = mGroupListingIds.length > 0
       ? (await client.from('interests').select('listing_id,user_id')
         .in('listing_id', mGroupListingIds)
@@ -3664,7 +3894,10 @@ app.get('/api/aktivitelerim', authMiddleware, async (req, res) => {
     for (const m of mArr) {
       const listing = m.listing_id ? mListingsMap.get(m.listing_id) : null;
       const participantIds = new Set([m.user1_id, m.user2_id].filter(Boolean));
-      if (isGroupMatchRecord(m, listing) && listing?.id) {
+      const persisted = persistedHomeByMatch.get(m.id);
+      if (persisted && persisted.size > 0) {
+        for (const userId of persisted) participantIds.add(userId);
+      } else if (isGroupMatchRecord(m, listing) && listing?.id) {
         if (listing.user_id) participantIds.add(listing.user_id);
         const acceptedSet = mAcceptedByListing.get(listing.id);
         if (acceptedSet) {
@@ -3758,6 +3991,10 @@ app.post('/api/ratings', authMiddleware, async (req, res) => {
       existingRating = await db.findOne('ratings', { rater_id: req.userId, ratee_id: rateeId, sport_id: sportId });
     }
     if (!existingRating) {
+      existingRating = await db.findOne('ratings', { match_id: matchId, rater_id: req.userId, ratee_id: rateeId });
+    }
+    if (!existingRating && !isGroupMatch) {
+      // Backward compatibility for legacy single-row match ratings.
       existingRating = await db.findOne('ratings', { match_id: matchId, rater_id: req.userId });
     }
 
@@ -4105,6 +4342,9 @@ ecosystemRouter.post('/', async (req, res) => {
         const sport = selectedSports[i % selectedSports.length];
         const botId = 'bot_' + uuid();
         const coords = botAutomation.estimateBotCoordinates({ citySeed: city.id, countryCode: cc });
+        const localizedSportName = botAutomation.translateSportName
+          ? botAutomation.translateSportName(sport.id, locale, sport.name)
+          : sport.name;
         const botPersona = buildBotPublicPersona({
           botName: bName,
           citySeed: city.id,
@@ -4119,13 +4359,16 @@ ecosystemRouter.post('/', async (req, res) => {
           name: bName,
           username: `bot_${bName.replace(/[^a-zA-Z0-9]/g, '').toLowerCase()}_${(nowMs + i) % 100000}`,
           password: '$2a$10$BOT_NO_LOGIN_PLACEHOLDER_HASH',
-          avatar_url: botAutomation.buildBotAvatarUrl({ gender, seed: `${bName}-${city.id}-${sport.name}` }),
+          avatar_url: botAutomation.buildBotAvatarUrl({
+            gender,
+            seed: `${botId}-${bName}-${city.id}-${sport.id}`,
+          }),
           cover_url: null, phone: null,
           is_admin: false, is_bot: true, bot_persona: null,
           onboarding_done: true, user_type: 'USER',
           city: city.name, city_id: persistCityId, country_code: cc,
           district: null, district_id: null,
-          bio: botAutomation.generateBotBio({ locale, sportName: sport.name, cityName: city.name }),
+          bio: botAutomation.generateBotBio({ locale, sportName: localizedSportName, cityName: city.name }),
           ...botPersona.socialLinks,
           sports: [{ id: sport.id, name: sport.name, icon: sport.icon }],
           level: ['BEGINNER', 'INTERMEDIATE', 'ADVANCED'][Math.floor(Math.random() * 3)],
@@ -4172,12 +4415,15 @@ ecosystemRouter.post('/', async (req, res) => {
         const futureDate = botAutomation.getFutureDate(1 + Math.floor(Math.random() * 6));
         const coords = botAutomation.estimateBotCoordinates({ citySeed: city.id, countryCode: cc });
         const listingId = 'listing_' + uuid();
+        const localizedSportName = botAutomation.translateSportName
+          ? botAutomation.translateSportName(sport.id, locale, sport.name)
+          : sport.name;
 
         listingRows.push({
           id: listingId,
           type: lType,
-          title: botAutomation.generateListingDesc({ name: bot.name, sport: sport.name, locale, city: city.name }),
-          description: botAutomation.generateListingDesc({ name: bot.name, sport: sport.name, locale, city: city.name }),
+          title: botAutomation.generateListingDesc({ name: bot.name, sport: localizedSportName, locale, city: city.name }),
+          description: botAutomation.generateListingDesc({ name: bot.name, sport: localizedSportName, locale, city: city.name }),
           sport_id: sport.id, sport_name: sport.name,
           city_id: persistCityId, city_name: city.name,
           district_id: null, district_name: null,
@@ -4415,6 +4661,9 @@ async function runEcosystemTick(eco) {
         const sport = fillSports[i % fillSports.length];
         const botId = 'bot_' + uuid();
         const coords = botAutomationFill.estimateBotCoordinates({ citySeed: eco.city_id, countryCode: eco.country_code });
+        const localizedSportName = botAutomationFill.translateSportName
+          ? botAutomationFill.translateSportName(sport.id, locale, sport.name)
+          : sport.name;
         const botPersona = buildBotPublicPersona({
           botName: bName,
           citySeed: eco.city_id || eco.city_name || 'city',
@@ -4426,12 +4675,15 @@ async function runEcosystemTick(eco) {
           id: botId, email: `bot_${nowMs}_fill_${i}_${eco.city_id.slice(0,6)}@sporpartner.internal`,
           name: bName, username: `bot_${bName.replace(/[^a-zA-Z0-9]/g,'').toLowerCase()}_fill_${(nowMs+i)%100000}`,
           password: '$2a$10$BOT_NO_LOGIN_PLACEHOLDER_HASH',
-          avatar_url: botAutomationFill.buildBotAvatarUrl({ gender, seed: `${bName}-${eco.city_id}-${sport.name}` }),
+          avatar_url: botAutomationFill.buildBotAvatarUrl({
+            gender,
+            seed: `${botId}-${bName}-${eco.city_id}-${sport.id}`,
+          }),
           cover_url: null, phone: null, is_admin: false, is_bot: true, bot_persona: null,
           onboarding_done: true, user_type: 'USER',
           city: eco.city_name, city_id: persistEcoCityId, country_code: eco.country_code,
           district: null, district_id: null,
-          bio: botAutomationFill.generateBotBio({ locale, sportName: sport.name, cityName: eco.city_name }),
+          bio: botAutomationFill.generateBotBio({ locale, sportName: localizedSportName, cityName: eco.city_name }),
           ...botPersona.socialLinks,
           sports: [{ id: sport.id, name: sport.name, icon: sport.icon }],
           level: ['BEGINNER','INTERMEDIATE','ADVANCED'][Math.floor(Math.random()*3)],
@@ -4572,6 +4824,11 @@ async function runEcosystemTick(eco) {
           scheduled_at: listing.date || null,
           completed_at: null,
         });
+        await persistMatchParticipants({
+          matchId,
+          participantIds: [listing.user_id, interest.user_id],
+          ownerId: listing.user_id,
+        });
         stats.newMatches++;
         matchCreated = true;
         matchedParticipantIds = [listing.user_id, interest.user_id].filter(Boolean);
@@ -4582,6 +4839,7 @@ async function runEcosystemTick(eco) {
       try {
         const acceptedParticipantIds = await getListingAcceptedParticipantIds(listing);
         matchedParticipantIds = acceptedParticipantIds;
+        let groupMatchId = null;
 
         const existingGroupMatch = await db.findOne('matches', {
           listing_id: listing.id,
@@ -4589,8 +4847,9 @@ async function runEcosystemTick(eco) {
 
         if (!existingGroupMatch) {
           const anchorParticipantId = acceptedParticipantIds.find(userId => userId && userId !== listing.user_id) || interest.user_id;
+          groupMatchId = 'match_' + uuid();
           await db.insert('matches', {
-            id: 'match_' + uuid(),
+            id: groupMatchId,
             listing_id: listing.id,
             source: 'LISTING',
             user1_id: listing.user_id,
@@ -4603,6 +4862,16 @@ async function runEcosystemTick(eco) {
           });
           stats.newMatches++;
           matchCreated = true;
+        } else {
+          groupMatchId = existingGroupMatch.id;
+        }
+
+        if (groupMatchId && acceptedParticipantIds.length > 0) {
+          await persistMatchParticipants({
+            matchId: groupMatchId,
+            participantIds: acceptedParticipantIds,
+            ownerId: listing.user_id,
+          });
         }
       } catch (groupMatchErr) {
         console.error(`Group match insert error (${listing.id}/${interest.id}):`, groupMatchErr.message);
@@ -4712,12 +4981,15 @@ async function runEcosystemTick(eco) {
     const coords = botAutomation ? botAutomation.estimateBotCoordinates({ citySeed: eco.city_id, countryCode: eco.country_code }) : { latitude: 0, longitude: 0 };
 
     const listingId = 'listing_' + uuid();
+    const localizedSportName = botAutomation && botAutomation.translateSportName
+      ? botAutomation.translateSportName(sport.id, locale, sport.name)
+      : sport.name;
     try {
       await db.insert('listings', {
         id: listingId,
         type: lType,
-        title: botAutomation ? botAutomation.generateListingDesc({ name: bot.name, sport: sport.name, locale, city: eco.city_name }) : `${bot.name} - ${sport.name}`,
-        description: botAutomation ? botAutomation.generateListingDesc({ name: bot.name, sport: sport.name, locale, city: eco.city_name }) : null,
+        title: botAutomation ? botAutomation.generateListingDesc({ name: bot.name, sport: localizedSportName, locale, city: eco.city_name }) : `${bot.name} - ${sport.name}`,
+        description: botAutomation ? botAutomation.generateListingDesc({ name: bot.name, sport: localizedSportName, locale, city: eco.city_name }) : null,
         sport_id: sport.id, sport_name: sport.name,
         city_id: persistEcoCityId, city_name: eco.city_name,
         district_id: null, district_name: null,
@@ -4864,11 +5136,22 @@ async function runEcosystemTick(eco) {
       .gte('created_at', twoDaysAgoC).order('created_at', { ascending: false }).limit(20);
 
     if ((postsToComment || []).length > 0) {
-      // Fetch existing comments from our bots to avoid double-commenting
+      // Fetch existing comments for de-duplication and bot-level cooldown.
       const postIdsC = (postsToComment || []).map(p => p.id);
       const { data: existingComments } = await client.from('comments')
-        .select('post_id,user_id,content').in('post_id', postIdsC).in('user_id', botIds);
-      const commentedSet = new Set((existingComments || []).map(c => `${c.user_id}_${c.post_id}`));
+        .select('post_id,user_id,content').in('post_id', postIdsC);
+
+      const authorIds = [...new Set((postsToComment || []).map(p => p.user_id).filter(Boolean))];
+      const { data: postAuthors } = authorIds.length > 0
+        ? await client.from('users').select('id,name,country_code').in('id', authorIds)
+        : { data: [] };
+      const postAuthorMap = new Map((postAuthors || []).map(u => [u.id, u]));
+
+      const commentedSet = new Set(
+        (existingComments || [])
+          .filter(c => botIdSet.has(c.user_id))
+          .map(c => `${c.user_id}_${c.post_id}`)
+      );
       const normalizeCommentSignature = (v) => normalizeText(String(v || '').replace(/\s+/g, ' '));
       const usedCommentsByPost = new Map();
       for (const ec of (existingComments || [])) {
@@ -4890,15 +5173,20 @@ async function runEcosystemTick(eco) {
           const botLocale = botAutomation.mapCountryCodeToLocale(
             bot.country_code || eco.country_code || 'EN'
           );
-          // Get poster name for personalized comment
-          const posterBot = bots.find(b => b.id === post.user_id);
-          const posterName = posterBot ? posterBot.name.split(' ')[0] : '';
+          const postAuthor = postAuthorMap.get(post.user_id);
+          const posterName = postAuthor?.name ? String(postAuthor.name).split(' ')[0] : '';
+          const postLocale = botAutomation.mapCountryCodeToLocale(
+            postAuthor?.country_code || eco.country_code || 'EN'
+          );
+          // Hybrid language policy: mostly post language, occasionally bot's own language.
+          const commentLocale = Math.random() < 0.82 ? postLocale : botLocale;
+
           const sportForComment = post.sport_id
             ? (validSports.find(s => s.id === post.sport_id) || null)
             : null;
           const commentSportName = sportForComment
             ? (botAutomation.translateSportName
-                ? botAutomation.translateSportName(sportForComment.id, botLocale, sportForComment.name)
+                ? botAutomation.translateSportName(sportForComment.id, commentLocale, sportForComment.name)
                 : sportForComment.name)
             : null;
 
@@ -4910,7 +5198,7 @@ async function runEcosystemTick(eco) {
           // Prevent clone comments on the same post by trying multiple variants.
           for (let attempt = 0; attempt < 12; attempt++) {
             const candidate = botAutomation.generateBotComment({
-              locale: botLocale,
+              locale: commentLocale,
               sportName: commentSportName,
               posterName,
               botId: bot.id,
