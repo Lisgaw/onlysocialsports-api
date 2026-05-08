@@ -483,57 +483,215 @@ async function generateMatchReminders({ now = new Date().toISOString(), limit = 
 
   const { data: dueMatches } = await dueMatchesQuery.limit(limit);
 
-  let reminderNotifications = 0;
-  if ((dueMatches || []).length === 0) return reminderNotifications;
+  let approvalReminderNotifications = 0;
+  if ((dueMatches || []).length > 0) {
+    const userIds = [...new Set(dueMatches.flatMap(m => [m.user1_id, m.user2_id]).filter(Boolean))];
+    const matchIds = dueMatches.map(m => m.id).filter(Boolean);
+    const [{ data: users }, { data: existingReminders }] = await Promise.all([
+      userIds.length > 0
+        ? client.from('users').select('id,name,avatar_url').in('id', userIds)
+        : { data: [] },
+      matchIds.length > 0
+        ? client.from('notifications').select('related_id,user_id')
+          .eq('type', 'MATCH_REMINDER')
+          .in('related_id', matchIds)
+        : { data: [] },
+    ]);
+    const usersMap = new Map((users || []).map(user => [user.id, user]));
+    const remindedPairs = new Set(
+      (existingReminders || []).map(notification => `${notification.related_id}:${notification.user_id}`),
+    );
 
-  const userIds = [...new Set(dueMatches.flatMap(m => [m.user1_id, m.user2_id]))];
-  const matchIds = dueMatches.map(m => m.id);
-  const [{ data: users }, { data: existingReminders }] = await Promise.all([
-    client.from('users').select('id,name,avatar_url').in('id', userIds),
-    client.from('notifications').select('related_id,user_id')
-      .eq('type', 'MATCH_REMINDER')
-      .in('related_id', matchIds),
-  ]);
-  const usersMap = new Map((users || []).map(user => [user.id, user]));
-  const remindedPairs = new Set(
-    (existingReminders || []).map(notification => `${notification.related_id}:${notification.user_id}`),
-  );
+    for (const match of dueMatches) {
+      const user1 = usersMap.get(match.user1_id);
+      const user2 = usersMap.get(match.user2_id);
+      const recipients = [
+        {
+          userId: match.user1_id,
+          sender: user2,
+          alreadyApproved: !!match.u1_approved,
+        },
+        {
+          userId: match.user2_id,
+          sender: user1,
+          alreadyApproved: !!match.u2_approved,
+        },
+      ];
 
-  for (const match of dueMatches) {
-    const user1 = usersMap.get(match.user1_id);
-    const user2 = usersMap.get(match.user2_id);
-    const recipients = [
-      {
-        userId: match.user1_id,
-        sender: user2,
-        alreadyApproved: !!match.u1_approved,
-      },
-      {
-        userId: match.user2_id,
-        sender: user1,
-        alreadyApproved: !!match.u2_approved,
-      },
-    ];
-
-    for (const recipient of recipients) {
-      const key = `${match.id}:${recipient.userId}`;
-      if (recipient.alreadyApproved || remindedPairs.has(key)) continue;
-      await pushNotification({
-        userId: recipient.userId,
-        type: 'MATCH_REMINDER',
-        title: 'Maç oynandı mı?',
-        body: `${recipient.sender?.name || 'Rakibin'} ile planlanan maç zamanı geçti. Oynandıysa maçı onaylayın.`,
-        relatedId: match.id,
-        senderId: recipient.sender?.id,
-        senderName: recipient.sender?.name,
-        senderAvatar: recipient.sender?.avatar_url,
-      });
-      remindedPairs.add(key);
-      reminderNotifications++;
+      for (const recipient of recipients) {
+        const key = `${match.id}:${recipient.userId}`;
+        if (recipient.alreadyApproved || remindedPairs.has(key)) continue;
+        await pushNotification({
+          userId: recipient.userId,
+          type: 'MATCH_REMINDER',
+          title: 'Maç oynandı mı?',
+          body: `${recipient.sender?.name || 'Rakibin'} ile planlanan maç zamanı geçti. Oynandıysa maçı onaylayın.`,
+          relatedId: match.id,
+          senderId: recipient.sender?.id,
+          senderName: recipient.sender?.name,
+          senderAvatar: recipient.sender?.avatar_url,
+        });
+        remindedPairs.add(key);
+        approvalReminderNotifications++;
+      }
     }
   }
 
-  return reminderNotifications;
+  let completedMatches = [];
+  if (userId) {
+    const { data: directCompleted } = await client.from('matches').select('*')
+      .eq('status', 'COMPLETED')
+      .or(`user1_id.eq.${userId},user2_id.eq.${userId}`)
+      .order('completed_at', { ascending: false, nullsFirst: false })
+      .order('created_at', { ascending: false })
+      .limit(limit);
+
+    const completedById = new Map((directCompleted || []).map(match => [match.id, match]));
+
+    const { data: acceptedRows } = await client.from('interests').select('listing_id')
+      .eq('user_id', userId)
+      .eq('status', 'ACCEPTED');
+    const acceptedListingIds = [...new Set((acceptedRows || []).map(row => row.listing_id).filter(Boolean))];
+
+    if (acceptedListingIds.length > 0) {
+      const { data: groupListings } = await client.from('listings').select('id,type,max_participants')
+        .in('id', acceptedListingIds)
+        .eq('type', 'PARTNER')
+        .gt('max_participants', 2);
+      const groupListingIds = [...new Set((groupListings || []).map(row => row.id).filter(Boolean))];
+
+      if (groupListingIds.length > 0) {
+        const { data: groupCompleted } = await client.from('matches').select('*')
+          .in('listing_id', groupListingIds)
+          .eq('status', 'COMPLETED')
+          .order('completed_at', { ascending: false, nullsFirst: false })
+          .order('created_at', { ascending: false });
+
+        const latestByListing = new Map();
+        for (const match of (groupCompleted || [])) {
+          if (!match?.listing_id || latestByListing.has(match.listing_id)) continue;
+          latestByListing.set(match.listing_id, match);
+        }
+
+        for (const match of latestByListing.values()) {
+          if (!match?.id) continue;
+          completedById.set(match.id, match);
+        }
+      }
+    }
+
+    completedMatches = [...completedById.values()]
+      .sort((a, b) => {
+        const aTime = new Date(a.completed_at || a.created_at || 0).getTime();
+        const bTime = new Date(b.completed_at || b.created_at || 0).getTime();
+        return bTime - aTime;
+      })
+      .slice(0, limit);
+  } else {
+    const { data: allCompleted } = await client.from('matches').select('*')
+      .eq('status', 'COMPLETED')
+      .order('completed_at', { ascending: false, nullsFirst: false })
+      .order('created_at', { ascending: false })
+      .limit(limit);
+    completedMatches = allCompleted || [];
+  }
+
+  let ratingReminderNotifications = 0;
+  if ((completedMatches || []).length > 0) {
+    const listingIds = [...new Set(completedMatches.map(match => match.listing_id).filter(Boolean))];
+    const listingsArr = listingIds.length > 0
+      ? (await client.from('listings').select('*').in('id', listingIds)).data || []
+      : [];
+    const listingsMap = new Map(listingsArr.map(listing => [listing.id, listing]));
+
+    const participantsByMatch = new Map();
+    const userIds = new Set();
+    for (const match of completedMatches) {
+      const listing = match.listing_id ? listingsMap.get(match.listing_id) : null;
+      const participantIds = await getMatchParticipantIds(match, listing);
+      const participantList = [...new Set((participantIds || []).filter(Boolean))];
+      participantsByMatch.set(match.id, participantList);
+      for (const participantId of participantList) userIds.add(participantId);
+    }
+
+    const matchIds = completedMatches.map(match => match.id).filter(Boolean);
+    const [{ data: users }, { data: existingReminders }, { data: ratings }] = await Promise.all([
+      userIds.size > 0
+        ? client.from('users').select('id,name,avatar_url').in('id', [...userIds])
+        : { data: [] },
+      matchIds.length > 0
+        ? client.from('notifications').select('related_id,user_id')
+          .eq('type', 'MATCH_RATING_REMINDER')
+          .in('related_id', matchIds)
+        : { data: [] },
+      matchIds.length > 0
+        ? client.from('ratings').select('match_id,rater_id,ratee_id').in('match_id', matchIds)
+        : { data: [] },
+    ]);
+
+    const usersMap = new Map((users || []).map(user => [user.id, user]));
+    const ratingRemindedPairs = new Set(
+      (existingReminders || []).map(notification => `${notification.related_id}:${notification.user_id}`),
+    );
+    const ratedPairs = new Set(
+      (ratings || []).map(row => `${row.match_id}:${row.rater_id}:${row.ratee_id}`),
+    );
+
+    for (const match of completedMatches) {
+      const participants = participantsByMatch.get(match.id) || [];
+      if (participants.length < 2) continue;
+      if (userId && !participants.includes(userId)) continue;
+
+      const listing = match.listing_id ? listingsMap.get(match.listing_id) : null;
+      const isGroupMatch = isGroupMatchRecord(match, listing) || participants.length > 2;
+      const raterIds = userId ? [userId] : participants;
+
+      for (const raterId of raterIds) {
+        if (!participants.includes(raterId)) continue;
+        const reminderKey = `${match.id}:${raterId}`;
+        if (ratingRemindedPairs.has(reminderKey)) continue;
+
+        const pendingTargets = participants.filter(targetId =>
+          targetId &&
+          targetId !== raterId &&
+          !ratedPairs.has(`${match.id}:${raterId}:${targetId}`)
+        );
+        if (pendingTargets.length === 0) continue;
+
+        const pendingNames = pendingTargets
+          .map(targetId => usersMap.get(targetId)?.name)
+          .filter(Boolean);
+
+        let body;
+        if (isGroupMatch) {
+          if (pendingTargets.length === 1) {
+            body = `${pendingNames[0] || 'Partnerin'} için maç değerlendirmesini tamamla.`;
+          } else {
+            body = `${formatNameList(pendingNames)} için maç değerlendirmesini tamamla.`;
+          }
+        } else {
+          body = `${pendingNames[0] || 'Rakibini'} henüz değerlendirmedin. Maçı puanlayabilirsin.`;
+        }
+
+        const sender = usersMap.get(pendingTargets[0]);
+        await pushNotification({
+          userId: raterId,
+          type: 'MATCH_RATING_REMINDER',
+          title: '⭐ Değerlendirme Hatırlatması',
+          body,
+          relatedId: match.id,
+          senderId: sender?.id,
+          senderName: sender?.name,
+          senderAvatar: sender?.avatar_url,
+        });
+
+        ratingRemindedPairs.add(reminderKey);
+        ratingReminderNotifications++;
+      }
+    }
+  }
+
+  return approvalReminderNotifications + ratingReminderNotifications;
 }
 
 function safeUser(row) {
