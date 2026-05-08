@@ -151,6 +151,53 @@ function buildBotPublicPersona({ botName, citySeed, countryCode, botIndex = 0, b
   };
 }
 
+const REQUIRED_LISTING_SPORTS = [
+  { id: 'okey', name: 'Okey', icon: '🀄', category: 'Masa Sporları' },
+  { id: 'tavla', name: 'Tavla', icon: '🎲', category: 'Masa Sporları' },
+  { id: 'satranc', name: 'Satranç', icon: '♟️', category: 'Masa Sporları' },
+];
+
+let requiredListingSportsEnsured = false;
+
+async function ensureRequiredListingSports() {
+  if (requiredListingSportsEnsured) return;
+
+  try {
+    const client = db.raw();
+    if (!client) return;
+
+    const requiredIds = REQUIRED_LISTING_SPORTS.map(item => item.id);
+    const { data: existing, error: readError } = await client
+      .from('sports')
+      .select('id')
+      .in('id', requiredIds);
+    if (readError) throw readError;
+
+    const existingIds = new Set((existing || []).map(row => row.id));
+    const missing = REQUIRED_LISTING_SPORTS.filter(item => !existingIds.has(item.id));
+    if (missing.length === 0) {
+      requiredListingSportsEnsured = true;
+      return;
+    }
+
+    const { error: insertError } = await client.from('sports').insert(
+      missing.map(item => ({
+        id: item.id,
+        name: item.name,
+        icon: item.icon,
+        category: item.category,
+      }))
+    );
+
+    // Unique conflict olursa başka bir request aynı anda eklemiş olabilir.
+    if (insertError && insertError.code !== '23505') throw insertError;
+
+    requiredListingSportsEnsured = true;
+  } catch (error) {
+    console.error('ensureRequiredListingSports error:', error?.message || error);
+  }
+}
+
 function buildBotBaselinePatch({ bot, eco, botIndex = 0 }) {
   const patch = {};
   const seedCity = bot.city_id || eco.city_id || bot.city || eco.city_name || 'city';
@@ -790,6 +837,7 @@ app.get('/api/geo/districts', async (req, res) => {
 
 app.get('/api/sports', async (_req, res) => {
   try {
+    await ensureRequiredListingSports();
     const data = await db.query('sports');
     res.json({ data: data.map(toCamel) });
   } catch (e) { res.status(500).json({ message: e.message }); }
@@ -1501,6 +1549,7 @@ listingsRouter.get('/:id', async (req, res) => {
 
 listingsRouter.post('/', contentFilter('title', 'description'), async (req, res) => {
   try {
+    await ensureRequiredListingSports();
     const user = await userById(req.userId);
     const body = sanitize(req.body);
     if (!body.title || body.title.trim().length < 3)
