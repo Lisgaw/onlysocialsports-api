@@ -521,6 +521,90 @@ function isGroupMatchRecord(match, listing = null) {
 }
 
 let hasMatchParticipantsTable = true;
+let hasMatchLocationVerificationsTable = true;
+
+const MATCH_GPS_RADIUS_METERS = 600;
+const MATCH_GPS_TRUST_REWARD = 20;
+
+function toFiniteNumber(value) {
+  const num = Number(value);
+  return Number.isFinite(num) ? num : null;
+}
+
+function isValidLatitude(value) {
+  return typeof value === 'number' && value >= -90 && value <= 90;
+}
+
+function isValidLongitude(value) {
+  return typeof value === 'number' && value >= -180 && value <= 180;
+}
+
+function haversineDistanceMeters(lat1, lon1, lat2, lon2) {
+  const toRad = deg => (deg * Math.PI) / 180;
+  const R = 6371000;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a = Math.sin(dLat / 2) ** 2
+    + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+}
+
+function getListingCoordinates(listing) {
+  if (!listing) return { latitude: null, longitude: null };
+  const latitude = toFiniteNumber(listing.latitude);
+  const longitude = toFiniteNumber(listing.longitude);
+  if (!isValidLatitude(latitude) || !isValidLongitude(longitude)) {
+    return { latitude: null, longitude: null };
+  }
+  return { latitude, longitude };
+}
+
+function buildGpsQualificationByUser(rows = [], listing = null) {
+  const byUser = new Map();
+  const validRows = (rows || []).filter(row => row?.user_id);
+  const listingCoords = getListingCoordinates(listing);
+
+  for (const row of validRows) {
+    const rowLat = toFiniteNumber(row.latitude);
+    const rowLon = toFiniteNumber(row.longitude);
+    if (!isValidLatitude(rowLat) || !isValidLongitude(rowLon)) continue;
+
+    let distanceToListingM = null;
+    if (listingCoords.latitude !== null && listingCoords.longitude !== null) {
+      distanceToListingM = Math.round(haversineDistanceMeters(
+        rowLat,
+        rowLon,
+        listingCoords.latitude,
+        listingCoords.longitude
+      ));
+    }
+
+    const nearVenue = distanceToListingM !== null && distanceToListingM <= MATCH_GPS_RADIUS_METERS;
+
+    let nearParticipant = false;
+    for (const other of validRows) {
+      if (!other?.user_id || other.user_id === row.user_id) continue;
+      const otherLat = toFiniteNumber(other.latitude);
+      const otherLon = toFiniteNumber(other.longitude);
+      if (!isValidLatitude(otherLat) || !isValidLongitude(otherLon)) continue;
+      const distanceBetweenUsers = haversineDistanceMeters(rowLat, rowLon, otherLat, otherLon);
+      if (distanceBetweenUsers <= MATCH_GPS_RADIUS_METERS) {
+        nearParticipant = true;
+        break;
+      }
+    }
+
+    byUser.set(row.user_id, {
+      nearVenue,
+      nearParticipant,
+      distanceToListingM,
+      qualifies: nearVenue || nearParticipant,
+    });
+  }
+
+  return byUser;
+}
 
 function isMissingRelationError(error, relationName) {
   const message = String(error?.message || '').toLowerCase();
@@ -555,6 +639,33 @@ async function getPersistedParticipantsByMatch(matchIds = []) {
       return new Map();
     }
     console.error('match_participants read error:', error.message || error);
+    return new Map();
+  }
+}
+
+async function getMatchLocationVerificationRows(matchIds = []) {
+  const ids = [...new Set((matchIds || []).filter(Boolean))];
+  const byMatch = new Map();
+  if (ids.length === 0 || !hasMatchLocationVerificationsTable) return byMatch;
+
+  try {
+    const client = db.raw();
+    const { data } = await client.from('match_location_verifications')
+      .select('id,match_id,user_id,latitude,longitude,verified_at,rewarded_at,distance_to_listing_m')
+      .in('match_id', ids);
+
+    for (const row of (data || [])) {
+      if (!row?.match_id) continue;
+      if (!byMatch.has(row.match_id)) byMatch.set(row.match_id, []);
+      byMatch.get(row.match_id).push(row);
+    }
+    return byMatch;
+  } catch (error) {
+    if (isMissingRelationError(error, 'match_location_verifications')) {
+      hasMatchLocationVerificationsTable = false;
+      return new Map();
+    }
+    console.error('match_location_verifications read error:', error.message || error);
     return new Map();
   }
 }
@@ -1131,11 +1242,16 @@ listingsRouter.use(authMiddleware);
 
 listingsRouter.get('/', async (req, res) => {
   try {
-    const { sport, city, district, type, level, gender, userId, countryCode, country_code, page = 1, pageSize = 20 } = req.query;
+    const { sport, city, district, type, level, gender, userId, countryCode, country_code, latitude, longitude, radiusM, page = 1, pageSize = 20 } = req.query;
     const pg = Number(page);
     const ps = Math.min(50, Number(pageSize));
     const skip = (pg - 1) * ps;
     const nowIso = new Date().toISOString();
+    const userLatitude = toFiniteNumber(latitude);
+    const userLongitude = toFiniteNumber(longitude);
+    const hasUserCoordinates = isValidLatitude(userLatitude) && isValidLongitude(userLongitude);
+    const nearbyRadiusMeters = toFiniteNumber(radiusM);
+    const hasNearbyRadiusFilter = Number.isFinite(nearbyRadiusMeters) && nearbyRadiusMeters > 0;
     const countryFilter = typeof countryCode === 'string'
       ? countryCode
       : (typeof country_code === 'string' ? country_code : null);
@@ -1194,12 +1310,159 @@ listingsRouter.get('/', async (req, res) => {
       });
     }
 
+    if (hasUserCoordinates) {
+      rows = rows
+        .map(row => {
+          const rowLat = toFiniteNumber(row.latitude);
+          const rowLon = toFiniteNumber(row.longitude);
+          if (!isValidLatitude(rowLat) || !isValidLongitude(rowLon)) {
+            return { ...row, distance_to_user_m: null };
+          }
+          const distanceToUserM = Math.round(haversineDistanceMeters(
+            userLatitude,
+            userLongitude,
+            rowLat,
+            rowLon
+          ));
+          return { ...row, distance_to_user_m: distanceToUserM };
+        })
+        .sort((a, b) => {
+          const aDistance = Number.isFinite(a.distance_to_user_m)
+            ? a.distance_to_user_m
+            : Number.MAX_SAFE_INTEGER;
+          const bDistance = Number.isFinite(b.distance_to_user_m)
+            ? b.distance_to_user_m
+            : Number.MAX_SAFE_INTEGER;
+          return aDistance - bDistance;
+        });
+
+      if (hasNearbyRadiusFilter) {
+        rows = rows.filter(row => (
+          Number.isFinite(row.distance_to_user_m) && row.distance_to_user_m <= nearbyRadiusMeters
+        ));
+      }
+    }
+
     const visibleRows = rows.map(row => maskAnonymousListingForViewer(row, req.userId));
 
     res.json({
       success: true,
       data: visibleRows.map(toCamel),
       pagination: { page: pg, hasNext: (data || []).length >= ps }
+    });
+  } catch (e) { res.status(500).json({ message: e.message }); }
+});
+
+listingsRouter.get('/nearby', async (req, res) => {
+  try {
+    const {
+      latitude,
+      longitude,
+      radiusM = 30000,
+      sport,
+      type,
+      level,
+      gender,
+      countryCode,
+      country_code,
+      page = 1,
+      pageSize = 20,
+    } = req.query;
+
+    const userLatitude = toFiniteNumber(latitude);
+    const userLongitude = toFiniteNumber(longitude);
+    if (!isValidLatitude(userLatitude) || !isValidLongitude(userLongitude)) {
+      return res.status(400).json({ message: 'Geçerli latitude ve longitude gönderilmeli.' });
+    }
+
+    const radiusMeters = toFiniteNumber(radiusM);
+    const effectiveRadius = Number.isFinite(radiusMeters) && radiusMeters > 0
+      ? Math.min(radiusMeters, 200000)
+      : 30000;
+    const pg = Math.max(1, Number(page) || 1);
+    const ps = Math.min(50, Math.max(1, Number(pageSize) || 20));
+    const nowIso = new Date().toISOString();
+
+    const countryFilter = typeof countryCode === 'string'
+      ? countryCode
+      : (typeof country_code === 'string' ? country_code : null);
+    const normalizedCountry = countryFilter ? String(countryFilter).trim().toUpperCase() : '';
+    const hasCountryFilter = /^[A-Z]{2,3}$/.test(normalizedCountry);
+
+    const client = db.raw();
+    let q = client.from('listings').select('*')
+      .in('status', ['ACTIVE', 'MATCHED'])
+      .gte('expires_at', nowIso)
+      .or(`date.is.null,date.gte.${nowIso}`)
+      .range(0, 499);
+
+    if (sport) q = q.or(`sport_id.eq.${sport},sport_name.eq.${sport}`);
+    if (type) q = q.eq('type', type);
+    if (level) q = q.eq('level', level);
+    if (gender && gender !== 'ANY') q = q.or(`gender.eq.${gender},gender.eq.ANY`);
+
+    const { data, error } = await q;
+    if (error) return res.status(500).json({ message: error.message });
+
+    let rows = data || [];
+    if (hasCountryFilter && rows.length > 0) {
+      const userIdsByRows = [...new Set(
+        rows
+          .filter(r => r.user_id)
+          .map(r => r.user_id)
+      )];
+
+      const userCountryById = new Map();
+      if (userIdsByRows.length > 0) {
+        const { data: userRows } = await client
+          .from('users')
+          .select('id,country_code')
+          .in('id', userIdsByRows);
+        for (const u of (userRows || [])) {
+          userCountryById.set(u.id, String(u.country_code || '').toUpperCase());
+        }
+      }
+
+      rows = rows.filter(row => {
+        const direct = String(row.country_code || '').toUpperCase();
+        if (direct) return direct === normalizedCountry;
+        const fromOwner = userCountryById.get(row.user_id) || '';
+        return fromOwner === normalizedCountry;
+      });
+    }
+
+    const withDistance = rows
+      .map(row => {
+        const rowLat = toFiniteNumber(row.latitude);
+        const rowLon = toFiniteNumber(row.longitude);
+        if (!isValidLatitude(rowLat) || !isValidLongitude(rowLon)) {
+          return null;
+        }
+
+        const distanceToUserM = Math.round(haversineDistanceMeters(
+          userLatitude,
+          userLongitude,
+          rowLat,
+          rowLon
+        ));
+
+        if (distanceToUserM > effectiveRadius) return null;
+        return { ...row, distance_to_user_m: distanceToUserM };
+      })
+      .filter(Boolean)
+      .sort((a, b) => a.distance_to_user_m - b.distance_to_user_m);
+
+    const start = (pg - 1) * ps;
+    const pageRows = withDistance.slice(start, start + ps);
+    const visibleRows = pageRows.map(row => maskAnonymousListingForViewer(row, req.userId));
+
+    res.json({
+      success: true,
+      data: visibleRows.map(toCamel),
+      pagination: {
+        page: pg,
+        hasNext: start + ps < withDistance.length,
+      },
     });
   } catch (e) { res.status(500).json({ message: e.message }); }
 });
@@ -1261,6 +1524,22 @@ listingsRouter.post('/', contentFilter('title', 'description'), async (req, res)
     }
 
     const sport = await db.findById('sports', body.sportId);
+    const hasLatitudeInput = body.latitude !== undefined
+      && body.latitude !== null
+      && String(body.latitude).trim() !== '';
+    const hasLongitudeInput = body.longitude !== undefined
+      && body.longitude !== null
+      && String(body.longitude).trim() !== '';
+
+    if (hasLatitudeInput !== hasLongitudeInput) {
+      return res.status(400).json({ message: 'latitude ve longitude birlikte gönderilmeli.' });
+    }
+
+    const latitude = hasLatitudeInput ? toFiniteNumber(body.latitude) : null;
+    const longitude = hasLongitudeInput ? toFiniteNumber(body.longitude) : null;
+    if (hasLatitudeInput && (!isValidLatitude(latitude) || !isValidLongitude(longitude))) {
+      return res.status(400).json({ message: 'Geçersiz konum koordinatları.' });
+    }
     // NOTE: city_id and district_id have FK constraints to cities/districts tables
     // Flutter sends numeric IDs from states.json (e.g. "2170") but DB has "c1" format
     // So we store null for IDs and rely on city_name/district_name for display
@@ -1282,6 +1561,8 @@ listingsRouter.post('/', contentFilter('title', 'description'), async (req, res)
       city_name: body.cityName || null,
       district_id: null,
       district_name: body.districtName || null,
+      latitude,
+      longitude,
       venue_id: body.venueId || null,
       venue_name: null,
       level: body.level || 'INTERMEDIATE',
@@ -1803,6 +2084,8 @@ matchesRouter.get('/', async (req, res) => {
       }
     }
 
+    const gpsVerificationsByMatch = await getMatchLocationVerificationRows(matchIds);
+
     const usersArr = userIds.size > 0
       ? (await client.from('users').select('*').in('id', [...userIds])).data || []
       : [];
@@ -1832,6 +2115,8 @@ matchesRouter.get('/', async (req, res) => {
         isGroupMatch: isGroupMatchRecord(m, listing),
         participantCount: participantIds.length,
         ratedByMeUserIds: [...(ratedByMeByMatch.get(m.id) || new Set())],
+        gpsVerifiedByMe: (gpsVerificationsByMatch.get(m.id) || [])
+          .some(row => row.user_id === req.userId && !!row.rewarded_at),
         participants: participantIds
           .map(userId => safeUser(usersMap.get(userId)))
           .filter(Boolean),
@@ -1880,6 +2165,8 @@ matchesRouter.get('/:id', async (req, res) => {
       .eq('rater_id', req.userId);
 
     const ratedByMeUserIds = [...new Set((ratedRows || []).map(row => row.ratee_id).filter(Boolean))];
+    const gpsRows = (await getMatchLocationVerificationRows([m.id])).get(m.id) || [];
+    const gpsVerifiedByMe = gpsRows.some(row => row.user_id === req.userId && !!row.rewarded_at);
 
     res.json({
       data: {
@@ -1888,6 +2175,7 @@ matchesRouter.get('/:id', async (req, res) => {
         isGroupMatch: isGroupMatchRecord(m, listing),
         participantCount: participantIds.length,
         ratedByMeUserIds,
+        gpsVerifiedByMe,
         participants: participantIds
           .map(userId => safeUser(usersMap.get(userId)))
           .filter(Boolean),
@@ -1963,7 +2251,7 @@ matchesRouter.patch('/:id/approve', async (req, res) => {
           type: 'MATCH_COMPLETED',
           title: '⭐ Değerlendirme Zamanı!',
           body: isGroupMatch
-            ? 'Grup maçı tamamlandı. Katılımcıları değerlendirebilirsiniz.'
+            ? 'Grup maçı tamamlandı. Partnerlerini değerlendirebilirsin.'
             : `${approver?.name || 'Rakibin'} maçı oynadığını onayladı`,
           relatedId: m.id,
           senderId: req.userId,
@@ -2075,6 +2363,100 @@ matchesRouter.post('/:id/otp/verify', async (req, res) => {
     await db.update('matches', m.id, { trust_score: newTrust });
     res.json({ message: 'Maç doğrulandı.', trustScore: newTrust });
   } catch (e) { res.status(500).json({ message: e.message }); }
+});
+
+matchesRouter.post('/:id/gps/verify', async (req, res) => {
+  try {
+    const latitude = toFiniteNumber(req.body?.latitude);
+    const longitude = toFiniteNumber(req.body?.longitude);
+
+    if (!isValidLatitude(latitude) || !isValidLongitude(longitude)) {
+      return res.status(400).json({ message: 'Geçerli enlem ve boylam gerekli.' });
+    }
+
+    const m = await db.findById('matches', req.params.id);
+    if (!m) return res.status(404).json({ message: 'Maç bulunamadı.' });
+
+    const listing = m.listing_id ? await listingById(m.listing_id) : null;
+    const participantIds = await getMatchParticipantIds(m, listing);
+    if (!participantIds.includes(req.userId)) {
+      return res.status(403).json({ message: 'Bu maçın katılımcısı değilsiniz.' });
+    }
+
+    if (!hasMatchLocationVerificationsTable) {
+      return res.status(503).json({ message: 'GPS doğrulama altyapısı hazır değil. Migration çalıştırılmalı.' });
+    }
+
+    const nowIso = new Date().toISOString();
+
+    let verificationRows = (await getMatchLocationVerificationRows([m.id])).get(m.id) || [];
+    if (!hasMatchLocationVerificationsTable) {
+      return res.status(503).json({ message: 'GPS doğrulama altyapısı hazır değil. Migration çalıştırılmalı.' });
+    }
+
+    const existing = verificationRows.find(row => row.user_id === req.userId);
+    if (existing) {
+      await db.update('match_location_verifications', existing.id, {
+        latitude,
+        longitude,
+        verified_at: nowIso,
+      });
+    } else {
+      await db.insert('match_location_verifications', {
+        id: 'mlv_' + uuid(),
+        match_id: m.id,
+        user_id: req.userId,
+        latitude,
+        longitude,
+        verified_at: nowIso,
+        rewarded_at: null,
+        distance_to_listing_m: null,
+      });
+    }
+
+    verificationRows = (await getMatchLocationVerificationRows([m.id])).get(m.id) || [];
+    const qualificationByUser = buildGpsQualificationByUser(verificationRows, listing);
+
+    const newlyRewardedUserIds = [];
+    for (const row of verificationRows) {
+      if (!row?.id || !row.user_id || row.rewarded_at) continue;
+      const qualification = qualificationByUser.get(row.user_id);
+      if (!qualification?.qualifies) continue;
+
+      await db.update('match_location_verifications', row.id, {
+        rewarded_at: nowIso,
+        distance_to_listing_m: qualification.distanceToListingM,
+      });
+      newlyRewardedUserIds.push(row.user_id);
+    }
+
+    let trustScore = Number(m.trust_score || 0);
+    if (newlyRewardedUserIds.length > 0) {
+      trustScore = Math.min(100, trustScore + (newlyRewardedUserIds.length * MATCH_GPS_TRUST_REWARD));
+      await db.update('matches', m.id, { trust_score: trustScore });
+    }
+
+    verificationRows = (await getMatchLocationVerificationRows([m.id])).get(m.id) || [];
+    const myVerification = verificationRows.find(row => row.user_id === req.userId);
+    const myQualification = qualificationByUser.get(req.userId);
+    const myVerified = !!myVerification?.rewarded_at;
+
+    res.json({
+      message: myVerified
+        ? 'Konum doğrulandı.'
+        : 'Konum kaydedildi. Karşı taraf doğrulaması bekleniyor.',
+      trustScore,
+      gpsVerified: myVerified,
+      waitingForOthers: !myVerified,
+      distanceToListingM: myQualification?.distanceToListingM ?? null,
+    });
+  } catch (e) {
+    if (isMissingRelationError(e, 'match_location_verifications')) {
+      hasMatchLocationVerificationsTable = false;
+      return res.status(503).json({ message: 'GPS doğrulama altyapısı hazır değil. Migration çalıştırılmalı.' });
+    }
+    res.status(500).json({ message: e.message });
+  }
 });
 
 matchesRouter.post('/:id/noshow', async (req, res) => {
@@ -4027,11 +4409,21 @@ app.post('/api/ratings', authMiddleware, async (req, res) => {
       await db.update('users', rateeId, { average_rating: newAvg, rating_count: newCount });
     }
 
-    await db.insert('ratings', {
-      id: uuid(), match_id: matchId, rater_id: req.userId,
-      ratee_id: rateeId, score: s, comment: comment || null,
-      sport_id: sportId,
-    });
+    try {
+      await db.insert('ratings', {
+        id: uuid(), match_id: matchId, rater_id: req.userId,
+        ratee_id: rateeId, score: s, comment: comment || null,
+        sport_id: sportId,
+      });
+    } catch (insertErr) {
+      const errMsg = String(insertErr?.message || '');
+      if (isGroupMatch && /(ratings_match_id_rater_id_key|match_id.*rater_id)/i.test(errMsg)) {
+        return res.status(409).json({
+          message: 'Grup maçında birden fazla partner değerlendirebilmek için ratings migrationı gerekli (005_ratings_group_unique.sql).',
+        });
+      }
+      throw insertErr;
+    }
 
     const rater = await userById(req.userId);
     await pushNotification({
@@ -4362,6 +4754,8 @@ ecosystemRouter.post('/', async (req, res) => {
           avatar_url: botAutomation.buildBotAvatarUrl({
             gender,
             seed: `${botId}-${bName}-${city.id}-${sport.id}`,
+            countryCode: cc,
+            locale,
           }),
           cover_url: null, phone: null,
           is_admin: false, is_bot: true, bot_persona: null,
@@ -4424,7 +4818,7 @@ ecosystemRouter.post('/', async (req, res) => {
           type: lType,
           title: botAutomation.generateListingDesc({ name: bot.name, sport: localizedSportName, locale, city: city.name }),
           description: botAutomation.generateListingDesc({ name: bot.name, sport: localizedSportName, locale, city: city.name }),
-          sport_id: sport.id, sport_name: sport.name,
+          sport_id: sport.id, sport_name: localizedSportName,
           city_id: persistCityId, city_name: city.name,
           district_id: null, district_name: null,
           venue_id: null, venue_name: null,
@@ -4678,6 +5072,8 @@ async function runEcosystemTick(eco) {
           avatar_url: botAutomationFill.buildBotAvatarUrl({
             gender,
             seed: `${botId}-${bName}-${eco.city_id}-${sport.id}`,
+            countryCode: eco.country_code,
+            locale,
           }),
           cover_url: null, phone: null, is_admin: false, is_bot: true, bot_persona: null,
           onboarding_done: true, user_type: 'USER',
@@ -4990,7 +5386,7 @@ async function runEcosystemTick(eco) {
         type: lType,
         title: botAutomation ? botAutomation.generateListingDesc({ name: bot.name, sport: localizedSportName, locale, city: eco.city_name }) : `${bot.name} - ${sport.name}`,
         description: botAutomation ? botAutomation.generateListingDesc({ name: bot.name, sport: localizedSportName, locale, city: eco.city_name }) : null,
-        sport_id: sport.id, sport_name: sport.name,
+        sport_id: sport.id, sport_name: localizedSportName,
         city_id: persistEcoCityId, city_name: eco.city_name,
         district_id: null, district_name: null,
         venue_id: null, venue_name: null,
