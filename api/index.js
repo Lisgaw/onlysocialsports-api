@@ -784,13 +784,34 @@ async function getMatchParticipantIds(match, listing = null) {
 }
 
 function pickDisplayUser2IdForViewer({ match, participantIds, viewerId }) {
-  if (!viewerId) return match.user2_id;
-  const participantSet = new Set((participantIds || []).filter(Boolean));
-  if (!participantSet.has(viewerId)) return match.user2_id;
-  if (viewerId === match.user1_id) {
-    return participantIds.find(id => id && id !== match.user1_id) || match.user2_id;
+  const ids = [...new Set((participantIds || []).filter(Boolean))];
+  const ownerId = match?.user1_id || null;
+  const fallbackUser2 = match?.user2_id || null;
+
+  if (!viewerId) {
+    return ids.find(id => id && id !== ownerId) || fallbackUser2 || ownerId;
   }
-  return viewerId;
+
+  const viewerInParticipants = ids.includes(viewerId);
+  if (!viewerInParticipants) {
+    return fallbackUser2 || ids.find(id => id && id !== ownerId) || ownerId;
+  }
+
+  const nonViewerIds = ids.filter(id => id && id !== viewerId);
+  if (nonViewerIds.length === 0) {
+    return fallbackUser2 || ownerId;
+  }
+
+  // Owner sees one of the other participants as quick preview opponent.
+  if (viewerId === ownerId) {
+    if (fallbackUser2 && fallbackUser2 !== viewerId) return fallbackUser2;
+    return nonViewerIds[0];
+  }
+
+  // Group participant should never see themselves as opponent; prefer owner first.
+  if (ownerId && ownerId !== viewerId) return ownerId;
+  if (fallbackUser2 && fallbackUser2 !== viewerId) return fallbackUser2;
+  return nonViewerIds[0];
 }
 
 const REACTION_TYPES = ['LIKE','LOVE','FIRE','STRONG','WOW','CLAP'];
