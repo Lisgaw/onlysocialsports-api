@@ -789,6 +789,22 @@ const OSM_SPORT_TAGS_BY_ID = {
   satranc: ['chess'],
 };
 
+const NOMINATIM_QUERY_TERMS_BY_SPORT_ID = {
+  football: ['futbol sahasi', 'hali saha', 'stadyum', 'football stadium'],
+  basketball: ['basketbol sahasi', 'basketball court'],
+  tennis: ['tenis kortu', 'tennis court'],
+  volleyball: ['voleybol sahasi', 'volleyball court'],
+  swimming: ['yuzme havuzu', 'swimming pool'],
+  running: ['kosu pisti', 'athletics track'],
+  badminton: ['badminton sahasi', 'badminton court'],
+  table_tennis: ['masa tenisi', 'table tennis hall'],
+  fitness: ['fitness salonu', 'gym'],
+  crossfit: ['crossfit', 'fitness salonu'],
+  hiking: ['doga yuruyus alani', 'hiking trail'],
+  cycling: ['bisiklet pisti', 'cycling track'],
+  padel: ['padel kortu', 'padel'],
+};
+
 function toFiniteNumber(value) {
   const num = Number(value);
   return Number.isFinite(num) ? num : null;
@@ -1021,32 +1037,64 @@ function mapNominatimVenueItem(item) {
   };
 }
 
+function buildNominatimVenueQueries(cityName, sportId) {
+  const normalizedSportId = normalizeVenueToken(sportId);
+  const mappedTerms = NOMINATIM_QUERY_TERMS_BY_SPORT_ID[normalizedSportId] || [];
+  const fallbackTerm = normalizeVenueText(sportId).replace(/_/g, ' ');
+  const sportTerms = mappedTerms.length > 0
+    ? mappedTerms
+    : [fallbackTerm, `${fallbackTerm} spor tesisi`];
+
+  const city = normalizeVenueText(cityName);
+  const querySet = new Set();
+  for (const term of sportTerms) {
+    const normalizedTerm = normalizeVenueText(term);
+    if (!normalizedTerm) continue;
+    querySet.add(`${city} ${normalizedTerm}`);
+  }
+
+  querySet.add(`${city} spor tesisi`);
+  querySet.add(`${city} stadium`);
+
+  return [...querySet].slice(0, 4);
+}
+
 async function fetchVenuesFromNominatim({ cityName, sportId }) {
-  const sportTokens = resolveOsmSportTags(sportId);
-  const sportSearchTerm = sportTokens.length > 0
-    ? sportTokens.join(' ')
-    : normalizeVenueText(sportId);
-  const query = new URLSearchParams({
-    q: `${sportSearchTerm} ${cityName}`.trim(),
-    format: 'jsonv2',
-    limit: '90',
-    addressdetails: '1',
-    extratags: '1',
-  });
+  const searchQueries = buildNominatimVenueQueries(cityName, sportId);
+  const responses = await Promise.all(
+    searchQueries.map(async (queryText) => {
+      const query = new URLSearchParams({
+        q: queryText,
+        format: 'jsonv2',
+        limit: '30',
+        addressdetails: '1',
+        extratags: '1',
+      });
 
-  const url = `${NOMINATIM_ENDPOINT}?${query.toString()}`;
-  const json = await fetchJsonWithTimeout(url, {
-    headers: {
-      Accept: 'application/json',
-      'Accept-Language': 'tr,en',
-      'User-Agent': OSM_HTTP_USER_AGENT,
-    },
-  }, NOMINATIM_REQUEST_TIMEOUT_MS);
+      const url = `${NOMINATIM_ENDPOINT}?${query.toString()}`;
+      try {
+        const json = await fetchJsonWithTimeout(url, {
+          headers: {
+            Accept: 'application/json',
+            'Accept-Language': 'tr,en',
+            'User-Agent': OSM_HTTP_USER_AGENT,
+          },
+        }, NOMINATIM_REQUEST_TIMEOUT_MS);
+        return Array.isArray(json) ? json : [];
+      } catch (error) {
+        return [];
+      }
+    })
+  );
 
-  const items = Array.isArray(json) ? json : [];
-  const sportTokenSet = new Set(sportTokens);
+  const items = responses.flat();
   const dedupe = new Set();
   const venues = [];
+
+  const normalizedCityToken = normalizeVenueToken(cityName);
+  const sportTokens = resolveOsmSportTags(sportId);
+  const tokenSet = new Set(sportTokens);
+  tokenSet.add(normalizeVenueToken(sportId));
 
   for (const item of items) {
     const mapped = mapNominatimVenueItem(item);
@@ -1055,7 +1103,8 @@ async function fetchVenuesFromNominatim({ cityName, sportId }) {
     const classToken = normalizeVenueToken(item?.class);
     const typeToken = normalizeVenueToken(item?.type);
     const addressToken = normalizeVenueToken(item?.display_name);
-    const hasSportHint = [...sportTokenSet].some(token => token && addressToken.includes(token));
+    const hasSportHint = [...tokenSet].some(token => token && addressToken.includes(token));
+    const hasCityHint = normalizedCityToken && addressToken.includes(normalizedCityToken);
     const isVenueLike = classToken === 'leisure'
       || classToken === 'amenity'
       || classToken === 'sport'
@@ -1064,6 +1113,7 @@ async function fetchVenuesFromNominatim({ cityName, sportId }) {
       || typeToken.includes('sports')
       || typeToken.includes('fitness');
 
+    if (!hasCityHint) continue;
     if (!isVenueLike && !hasSportHint) continue;
 
     const key = `${mapped.name.toLocaleLowerCase('tr-TR')}::${mapped.latitude.toFixed(5)}::${mapped.longitude.toFixed(5)}`;
@@ -1156,23 +1206,25 @@ async function fetchVenuesFromOverpass({ cityName, sportId }) {
 }
 
 async function fetchVenuesFromOsm({ cityName, sportId }) {
-  let overpassError = null;
+  try {
+    const nominatimVenues = await fetchVenuesFromNominatim({ cityName, sportId });
+    if (nominatimVenues.length > 0) {
+      return { source: 'osm-nominatim', venues: nominatimVenues };
+    }
+  } catch (error) {
+    console.warn('venues nominatim fetch warning:', error?.message || error);
+  }
+
   try {
     const overpassVenues = await fetchVenuesFromOverpass({ cityName, sportId });
     if (overpassVenues.length > 0) {
       return { source: 'osm-overpass', venues: overpassVenues };
     }
   } catch (error) {
-    overpassError = error;
+    console.warn('venues overpass fetch warning:', error?.message || error);
   }
 
-  const nominatimVenues = await fetchVenuesFromNominatim({ cityName, sportId });
-  if (nominatimVenues.length > 0) {
-    return { source: 'osm-nominatim', venues: nominatimVenues };
-  }
-
-  if (overpassError) throw overpassError;
-  return { source: 'osm-nominatim', venues: [] };
+  return { source: 'osm-empty', venues: [] };
 }
 
 function getListingCoordinates(listing) {
