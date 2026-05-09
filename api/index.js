@@ -16,6 +16,89 @@ const compression = require('compression');
 
 // ── Supabase ────────────────────────────────────────────────────────────────
 const db = require('../db/supabase');
+const { toCamel, toSnake, toUserResponse, fromUserBody, parsePagination } = require('../db/helpers');
+const { generateTokens, verifyRefreshToken, authMiddleware } = require('../middleware/auth');
+
+let contentFilterFn;
+try { contentFilterFn = require('../middleware/content-filter').contentFilter; } catch { contentFilterFn = null; }
+const contentFilter = contentFilterFn || ((..._f) => (_req, _res, next) => next());
+
+const app = express();
+
+// compression removed - Vercel CDN handles gzip/brotli automatically
+app.use(helmet({
+  contentSecurityPolicy: false,
+  crossOriginResourcePolicy: false,
+  crossOriginOpenerPolicy: false,
+}));
+app.use(cors({
+  origin: '*',
+  methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE', 'OPTIONS'],
+  allowedHeaders: [
+    'Content-Type', 'Authorization',
+    'X-API-Version', 'X-Client-Type',
+  ],
+  exposedHeaders: ['Content-Length'],
+  optionsSuccessStatus: 204,
+}));
+app.options('*', cors());
+app.use(express.json({ limit: '500kb' }));
+
+const RATE_LIMIT_MAX = parseInt(process.env.RATE_LIMIT_MAX) || 300;
+const rateBuckets = new Map();
+app.use((req, res, next) => {
+  const ip = req.headers['x-forwarded-for'] || req.ip || 'unknown';
+  const now = Date.now();
+  let bucket = rateBuckets.get(ip);
+  if (!bucket || now - bucket.start > 60000) {
+    bucket = { start: now, count: 0 };
+    rateBuckets.set(ip, bucket);
+  }
+  bucket.count++;
+  if (bucket.count > RATE_LIMIT_MAX) return res.status(429).json({ message: 'Rate limit exceeded.' });
+  next();
+});
+
+const loginAttempts = new Map();
+const LOGIN_MAX = 5;
+const LOGIN_WINDOW = 15 * 60 * 1000;
+
+function sanitize(obj) {
+  if (!obj || typeof obj !== 'object') return obj;
+  const r = {};
+  for (const [k, v] of Object.entries(obj)) {
+    r[k] = typeof v === 'string' ? v.replace(/[<>]/g, '') : v;
+  }
+  return r;
+}
+
+const SOCIAL_PLATFORMS = [
+  'instagram', 'tiktok', 'facebook', 'twitter', 'youtube', 'linkedin',
+  'discord', 'twitch', 'snapchat', 'telegram', 'whatsapp', 'vk', 'litmatch',
+];
+const BOT_SOCIAL_PLATFORM_POOL = ['instagram', 'youtube', 'telegram', 'vk', 'tiktok', 'twitter'];
+
+function hashText(seed = '') {
+  let h = 0;
+  const s = String(seed || '');
+  for (let i = 0; i < s.length; i++) {
+    h = (h << 5) - h + s.charCodeAt(i);
+    h |= 0;
+  }
+  return Math.abs(h);
+}
+
+function seededInt(seed, min, max) {
+  const lo = Number(min);
+  const hi = Number(max);
+  if (!Number.isFinite(lo) || !Number.isFinite(hi) || hi <= lo) return lo;
+  return lo + (hashText(seed) % (hi - lo + 1));
+}
+
+function normalizedHandleBase(name) {
+  const raw = String(name || '').replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+  return raw.length >= 3 ? raw : 'sportbot';
+}
 
 function buildBotSocialLinks({ botName, citySeed, countryCode, botIndex = 0, botId = '' }) {
   const links = {};
