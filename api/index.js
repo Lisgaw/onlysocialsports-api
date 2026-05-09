@@ -727,9 +727,59 @@ function isGroupMatchRecord(match, listing = null) {
 
 let hasMatchParticipantsTable = true;
 let hasMatchLocationVerificationsTable = true;
+let hasVenueCacheTable = true;
 
 const MATCH_GPS_RADIUS_METERS = 600;
 const MATCH_GPS_TRUST_REWARD = 20;
+const VENUE_CACHE_TTL_DAYS = 30;
+const OVERPASS_ENDPOINT = 'https://overpass-api.de/api/interpreter';
+const OVERPASS_TIMEOUT_SECONDS = 25;
+const OVERPASS_REQUEST_TIMEOUT_MS = 12000;
+const MAX_VENUE_RESULTS = 60;
+const VENUE_FACILITY_FILTER = 'sports_centre|pitch|stadium|track';
+const MAX_GLOBE_DISCOVERY_ROWS = 2000;
+const DEFAULT_GLOBE_DISCOVERY_DAYS = 14;
+const MAX_GLOBE_DISCOVERY_DAYS = 90;
+const DEFAULT_GLOBE_HOTSPOT_LIMIT = 120;
+const MAX_GLOBE_HOTSPOT_LIMIT = 300;
+
+const OSM_SPORT_TAGS_BY_ID = {
+  football: ['soccer', 'football'],
+  basketball: ['basketball'],
+  tennis: ['tennis'],
+  volleyball: ['volleyball', 'beachvolleyball'],
+  table_tennis: ['table_tennis'],
+  badminton: ['badminton'],
+  swimming: ['swimming'],
+  running: ['running', 'athletics'],
+  cycling: ['cycling'],
+  hiking: ['hiking'],
+  yoga: ['yoga'],
+  fitness: ['fitness', 'crossfit'],
+  crossfit: ['crossfit', 'fitness'],
+  boxing: ['boxing'],
+  wrestling: ['wrestling'],
+  martial_arts: ['martial_arts', 'judo', 'karate', 'taekwondo'],
+  pilates: ['fitness'],
+  skateboarding: ['skateboard'],
+  skating: ['ice_skating', 'roller_skating'],
+  handball: ['handball'],
+  rugby: ['rugby'],
+  american_football: ['american_football'],
+  cricket: ['cricket'],
+  golf: ['golf'],
+  climbing: ['climbing'],
+  archery: ['archery'],
+  bowling: ['bowls', 'tenpin'],
+  billiards: ['billiards'],
+  darts: ['darts'],
+  pickleball: ['pickleball'],
+  beach_volleyball: ['beachvolleyball', 'volleyball'],
+  padel: ['padel', 'tennis'],
+  okey: ['table_tennis'],
+  tavla: ['table_tennis'],
+  satranc: ['chess'],
+};
 
 function toFiniteNumber(value) {
   const num = Number(value);
@@ -753,6 +803,207 @@ function haversineDistanceMeters(lat1, lon1, lat2, lon2) {
     + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   return R * c;
+}
+
+function normalizeVenueText(value) {
+  return String(value || '').trim().replace(/\s+/g, ' ');
+}
+
+function normalizeVenueToken(value) {
+  return normalizeVenueText(value)
+    .toLocaleLowerCase('tr-TR')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+}
+
+function normalizeCountryCode(value) {
+  const normalized = String(value || '').trim().toUpperCase();
+  return /^[A-Z]{2,3}$/.test(normalized) ? normalized : '';
+}
+
+function roundCoordinate(value) {
+  return Math.round(value * 100) / 100;
+}
+
+function escapeOverpassString(value) {
+  return String(value || '')
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"');
+}
+
+function escapeRegexToken(value) {
+  return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function resolveOsmSportTags(sportId) {
+  const normalized = normalizeVenueToken(sportId);
+  const mapped = OSM_SPORT_TAGS_BY_ID[normalized];
+  if (Array.isArray(mapped) && mapped.length > 0) {
+    return [...new Set(mapped.map(tag => normalizeVenueToken(tag)).filter(Boolean))];
+  }
+  return normalized ? [normalized] : [];
+}
+
+function buildVenueCacheKey(cityName, sportId) {
+  return `${normalizeVenueToken(cityName)}::${normalizeVenueToken(sportId)}`;
+}
+
+function buildOverpassVenueQuery({ cityName, sportId }) {
+  const safeCityName = escapeOverpassString(cityName);
+  const sportTokens = resolveOsmSportTags(sportId).map(escapeRegexToken);
+  const sportRegex = sportTokens.length > 0
+    ? sportTokens.join('|')
+    : escapeRegexToken(normalizeVenueToken(sportId));
+
+  return [
+    `[out:json][timeout:${OVERPASS_TIMEOUT_SECONDS}];`,
+    `area["name"="${safeCityName}"]["boundary"="administrative"]->.searchArea;`,
+    '(',
+    `  nwr["leisure"~"${VENUE_FACILITY_FILTER}"]["sport"~"${sportRegex}",i](area.searchArea);`,
+    `  nwr["sport"~"${sportRegex}",i](area.searchArea);`,
+    ');',
+    'out center tags;',
+  ].join('\n');
+}
+
+function buildVenueAddress(tags = {}) {
+  const parts = [
+    tags['addr:street'],
+    tags['addr:housenumber'],
+    tags['addr:suburb'],
+    tags['addr:city'],
+  ]
+    .map(part => normalizeVenueText(part))
+    .filter(Boolean);
+
+  if (parts.length === 0) {
+    const full = normalizeVenueText(tags['addr:full']);
+    return full || null;
+  }
+  return parts.join(' ');
+}
+
+function mapOverpassVenueElement(element) {
+  if (!element?.id || !element?.type) return null;
+
+  const tags = element.tags || {};
+  const name = normalizeVenueText(tags.name || tags.operator || tags.brand);
+  if (!name) return null;
+
+  const latitude = toFiniteNumber(element.lat ?? element.center?.lat);
+  const longitude = toFiniteNumber(element.lon ?? element.center?.lon);
+  if (!isValidLatitude(latitude) || !isValidLongitude(longitude)) return null;
+
+  const osmId = `${element.type}:${element.id}`;
+  return {
+    id: `osm_${element.type}_${element.id}`,
+    osmId,
+    name,
+    address: buildVenueAddress(tags),
+    latitude,
+    longitude,
+    source: 'OSM',
+  };
+}
+
+async function readVenueCache(client, cacheKey) {
+  if (!client || !hasVenueCacheTable) return null;
+
+  try {
+    const { data, error } = await client
+      .from('venues_cache')
+      .select('cache_key,venues_json,expires_at')
+      .eq('cache_key', cacheKey)
+      .limit(1);
+
+    if (error) throw error;
+
+    const row = (data || [])[0];
+    if (!row) return null;
+
+    const expiresAtMs = Date.parse(row.expires_at || '');
+    if (!Number.isFinite(expiresAtMs) || expiresAtMs <= Date.now()) return null;
+
+    return Array.isArray(row.venues_json) ? row.venues_json : [];
+  } catch (error) {
+    if (isMissingRelationError(error, 'venues_cache')) {
+      hasVenueCacheTable = false;
+      return null;
+    }
+    console.error('venues_cache read error:', error?.message || error);
+    return null;
+  }
+}
+
+async function writeVenueCache(client, { cacheKey, cityName, sportId, venues }) {
+  if (!client || !hasVenueCacheTable) return;
+
+  try {
+    const now = new Date();
+    const expiresAt = new Date(
+      now.getTime() + VENUE_CACHE_TTL_DAYS * 24 * 60 * 60 * 1000
+    ).toISOString();
+
+    const { error } = await client
+      .from('venues_cache')
+      .upsert({
+        cache_key: cacheKey,
+        city_name: cityName,
+        sport_id: sportId,
+        source: 'overpass',
+        venues_json: Array.isArray(venues) ? venues : [],
+        expires_at: expiresAt,
+        updated_at: now.toISOString(),
+      }, { onConflict: 'cache_key' });
+
+    if (error) throw error;
+  } catch (error) {
+    if (isMissingRelationError(error, 'venues_cache')) {
+      hasVenueCacheTable = false;
+      return;
+    }
+    console.error('venues_cache write error:', error?.message || error);
+  }
+}
+
+async function fetchVenuesFromOverpass({ cityName, sportId }) {
+  const overpassQuery = buildOverpassVenueQuery({ cityName, sportId });
+  const payload = new URLSearchParams({ data: overpassQuery }).toString();
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), OVERPASS_REQUEST_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(OVERPASS_ENDPOINT, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+      },
+      body: payload,
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      throw new Error(`Overpass status: ${response.status}`);
+    }
+
+    const json = await response.json();
+    const elements = Array.isArray(json?.elements) ? json.elements : [];
+    const dedupe = new Set();
+    const venues = [];
+
+    for (const element of elements) {
+      const mapped = mapOverpassVenueElement(element);
+      if (!mapped) continue;
+      if (dedupe.has(mapped.osmId)) continue;
+      dedupe.add(mapped.osmId);
+      venues.push(mapped);
+      if (venues.length >= MAX_VENUE_RESULTS) break;
+    }
+
+    return venues;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 function getListingCoordinates(listing) {
@@ -1461,6 +1712,198 @@ app.delete('/api/upload', authMiddleware, async (req, res) => {
   }
 });
 
+app.get('/api/venues', authMiddleware, async (req, res) => {
+  try {
+    const cityName = normalizeVenueText(req.query.cityName);
+    const sportId = normalizeVenueToken(req.query.sportId);
+
+    if (!cityName) {
+      return res.status(400).json({ message: 'cityName zorunlu.' });
+    }
+    if (!sportId) {
+      return res.status(400).json({ message: 'sportId zorunlu.' });
+    }
+
+    const cacheKey = buildVenueCacheKey(cityName, sportId);
+    const client = db.raw();
+    const cached = await readVenueCache(client, cacheKey);
+    if (cached !== null) {
+      return res.json({ success: true, source: 'cache', data: cached });
+    }
+
+    const venues = await fetchVenuesFromOverpass({ cityName, sportId });
+    await writeVenueCache(client, {
+      cacheKey,
+      cityName,
+      sportId,
+      venues,
+    });
+
+    res.json({ success: true, source: 'osm', data: venues });
+  } catch (e) {
+    console.error('venues endpoint error:', e?.message || e);
+    res.status(500).json({ message: 'Tesisler alınamadı.' });
+  }
+});
+
+app.get('/api/discovery/globe', authMiddleware, async (req, res) => {
+  try {
+    const daysInput = Number(req.query.days);
+    const limitInput = Number(req.query.limit);
+
+    const windowDays = Number.isFinite(daysInput)
+      ? Math.min(MAX_GLOBE_DISCOVERY_DAYS, Math.max(1, Math.round(daysInput)))
+      : DEFAULT_GLOBE_DISCOVERY_DAYS;
+
+    const hotspotLimit = Number.isFinite(limitInput)
+      ? Math.min(MAX_GLOBE_HOTSPOT_LIMIT, Math.max(10, Math.round(limitInput)))
+      : DEFAULT_GLOBE_HOTSPOT_LIMIT;
+
+    const windowStartIso = new Date(
+      Date.now() - windowDays * 24 * 60 * 60 * 1000
+    ).toISOString();
+
+    const client = db.raw();
+    const { data, error } = await client
+      .from('listings')
+      .select('id,sport_id,sport_name,city_name,country_code,latitude,longitude,created_at,status')
+      .in('status', ['ACTIVE', 'MATCHED', 'COMPLETED'])
+      .gte('created_at', windowStartIso)
+      .order('created_at', { ascending: false })
+      .limit(MAX_GLOBE_DISCOVERY_ROWS);
+
+    if (error) {
+      return res.status(500).json({ message: error.message });
+    }
+
+    const rows = data || [];
+    const hotspotsByKey = new Map();
+    const topSportsById = new Map();
+    const activeCityKeys = new Set();
+    const activeCountries = new Set();
+    let geoTaggedListings = 0;
+
+    for (const row of rows) {
+      const sportId = normalizeVenueToken(row.sport_id || row.sport_name || 'other') || 'other';
+      const sportName = normalizeVenueText(row.sport_name || row.sport_id || 'Other');
+
+      const sportStat = topSportsById.get(sportId) || {
+        sportId,
+        sportName,
+        count: 0,
+      };
+      sportStat.count += 1;
+      topSportsById.set(sportId, sportStat);
+
+      const latitude = toFiniteNumber(row.latitude);
+      const longitude = toFiniteNumber(row.longitude);
+      if (!isValidLatitude(latitude) || !isValidLongitude(longitude)) {
+        continue;
+      }
+
+      geoTaggedListings += 1;
+
+      const cityName = normalizeVenueText(row.city_name || 'Unknown');
+      const countryCode = normalizeCountryCode(row.country_code);
+      const roundedLat = roundCoordinate(latitude);
+      const roundedLon = roundCoordinate(longitude);
+
+      activeCityKeys.add(`${normalizeVenueToken(cityName)}::${countryCode}`);
+      if (countryCode) {
+        activeCountries.add(countryCode);
+      }
+
+      const hotspotId = [
+        normalizeVenueToken(cityName) || 'unknown',
+        countryCode || 'xx',
+        roundedLat.toFixed(2),
+        roundedLon.toFixed(2),
+      ].join('_');
+
+      if (!hotspotsByKey.has(hotspotId)) {
+        hotspotsByKey.set(hotspotId, {
+          id: hotspotId,
+          cityName,
+          countryCode: countryCode || null,
+          latitude: roundedLat,
+          longitude: roundedLon,
+          listingsCount: 0,
+          lastListingAtMs: 0,
+          sports: new Map(),
+        });
+      }
+
+      const hotspot = hotspotsByKey.get(hotspotId);
+      hotspot.listingsCount += 1;
+
+      const createdAtMs = Date.parse(row.created_at || '');
+      if (Number.isFinite(createdAtMs) && createdAtMs > hotspot.lastListingAtMs) {
+        hotspot.lastListingAtMs = createdAtMs;
+      }
+
+      const bucketSport = hotspot.sports.get(sportId) || {
+        sportId,
+        sportName,
+        count: 0,
+      };
+      bucketSport.count += 1;
+      hotspot.sports.set(sportId, bucketSport);
+    }
+
+    const sortedHotspots = [...hotspotsByKey.values()]
+      .sort((a, b) => b.listingsCount - a.listingsCount)
+      .slice(0, hotspotLimit);
+
+    const maxHotspotCount = sortedHotspots.length > 0
+      ? sortedHotspots[0].listingsCount
+      : 1;
+
+    const hotspots = sortedHotspots.map(hotspot => {
+      const dominantSport = [...hotspot.sports.values()]
+        .sort((a, b) => b.count - a.count)[0];
+
+      return {
+        id: hotspot.id,
+        cityName: hotspot.cityName,
+        countryCode: hotspot.countryCode,
+        latitude: hotspot.latitude,
+        longitude: hotspot.longitude,
+        listingsCount: hotspot.listingsCount,
+        dominantSportId: dominantSport?.sportId || null,
+        dominantSportName: dominantSport?.sportName || null,
+        intensity: Number((hotspot.listingsCount / maxHotspotCount).toFixed(4)),
+        lastListingAt: hotspot.lastListingAtMs > 0
+          ? new Date(hotspot.lastListingAtMs).toISOString()
+          : null,
+      };
+    });
+
+    const topSports = [...topSportsById.values()]
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 8);
+
+    res.json({
+      success: true,
+      data: {
+        summary: {
+          windowDays,
+          totalListings: rows.length,
+          geoTaggedListings,
+          activeCities: activeCityKeys.size,
+          activeCountries: activeCountries.size,
+          hotspotCount: hotspots.length,
+          generatedAt: new Date().toISOString(),
+        },
+        hotspots,
+        topSports,
+      },
+    });
+  } catch (e) {
+    console.error('discovery/globe error:', e?.message || e);
+    res.status(500).json({ message: 'Globe verisi alınamadı.' });
+  }
+});
+
 // ══════════════════════════════════════════════════════════════════════════════
 //  LISTINGS
 // ══════════════════════════════════════════════════════════════════════════════
@@ -1777,6 +2220,7 @@ listingsRouter.post('/', contentFilter('title', 'description'), async (req, res)
     const expiresAt = body.expiresAt
       || (dateVal ? new Date(new Date(dateVal).getTime() + 24 * 3600 * 1000).toISOString()
                   : new Date(Date.now() + MAX_LISTING_DAYS * 24 * 3600 * 1000).toISOString());
+    const venueName = normalizeVenueText(body.venueName);
 
     const listingRow = {
       id: 'listing_' + uuid(),
@@ -1792,7 +2236,7 @@ listingsRouter.post('/', contentFilter('title', 'description'), async (req, res)
       latitude,
       longitude,
       venue_id: body.venueId || null,
-      venue_name: null,
+      venue_name: venueName || null,
       level: body.level || 'INTERMEDIATE',
       gender: body.gender || 'ANY',
       date: dateVal,
@@ -1883,6 +2327,7 @@ listingsRouter.patch('/:id', contentFilter('description'), async (req, res) => {
       date: 'date', dateTime: 'date', description: 'description',
       maxParticipants: 'max_participants', cityId: 'city_id', cityName: 'city_name',
       districtId: 'district_id', districtName: 'district_name',
+      venueId: 'venue_id', venueName: 'venue_name',
     };
     for (const [k, col] of Object.entries(allowed)) {
       if (body[k] !== undefined) changes[col] = body[k];
