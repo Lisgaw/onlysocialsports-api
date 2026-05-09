@@ -732,10 +732,18 @@ let hasVenueCacheTable = true;
 const MATCH_GPS_RADIUS_METERS = 600;
 const MATCH_GPS_TRUST_REWARD = 20;
 const VENUE_CACHE_TTL_DAYS = 30;
-const OVERPASS_ENDPOINT = 'https://overpass-api.de/api/interpreter';
+const OVERPASS_ENDPOINTS = [
+  'https://overpass-api.de/api/interpreter',
+  'https://overpass.kumi.systems/api/interpreter',
+  'https://lz4.overpass-api.de/api/interpreter',
+];
+const NOMINATIM_ENDPOINT = 'https://nominatim.openstreetmap.org/search';
+const OSM_HTTP_USER_AGENT = 'SporPartner/1.0 (+https://onlysocialsport.com)';
 const OVERPASS_TIMEOUT_SECONDS = 25;
-const OVERPASS_REQUEST_TIMEOUT_MS = 12000;
+const OVERPASS_REQUEST_TIMEOUT_MS = 2600;
+const NOMINATIM_REQUEST_TIMEOUT_MS = 2200;
 const MAX_VENUE_RESULTS = 60;
+const VENUE_SEARCH_RADIUS_METERS = 22000;
 const VENUE_FACILITY_FILTER = 'sports_centre|pitch|stadium|track';
 const MAX_GLOBE_DISCOVERY_ROWS = 2000;
 const DEFAULT_GLOBE_DISCOVERY_DAYS = 14;
@@ -848,8 +856,9 @@ function buildVenueCacheKey(cityName, sportId) {
   return `${normalizeVenueToken(cityName)}::${normalizeVenueToken(sportId)}`;
 }
 
-function buildOverpassVenueQuery({ cityName, sportId }) {
-  const safeCityName = escapeOverpassString(cityName);
+function buildOverpassVenueQuery({ latitude, longitude, sportId }) {
+  const lat = Number(latitude);
+  const lon = Number(longitude);
   const sportTokens = resolveOsmSportTags(sportId).map(escapeRegexToken);
   const sportRegex = sportTokens.length > 0
     ? sportTokens.join('|')
@@ -857,10 +866,9 @@ function buildOverpassVenueQuery({ cityName, sportId }) {
 
   return [
     `[out:json][timeout:${OVERPASS_TIMEOUT_SECONDS}];`,
-    `area["name"="${safeCityName}"]["boundary"="administrative"]->.searchArea;`,
     '(',
-    `  nwr["leisure"~"${VENUE_FACILITY_FILTER}"]["sport"~"${sportRegex}",i](area.searchArea);`,
-    `  nwr["sport"~"${sportRegex}",i](area.searchArea);`,
+    `  nwr["leisure"~"${VENUE_FACILITY_FILTER}"]["sport"~"${sportRegex}",i](around:${VENUE_SEARCH_RADIUS_METERS},${lat},${lon});`,
+    `  nwr["sport"~"${sportRegex}",i](around:${VENUE_SEARCH_RADIUS_METERS},${lat},${lon});`,
     ');',
     'out center tags;',
   ].join('\n');
@@ -906,8 +914,9 @@ function mapOverpassVenueElement(element) {
   };
 }
 
-async function readVenueCache(client, cacheKey) {
+async function readVenueCache(client, cacheKey, options = {}) {
   if (!client || !hasVenueCacheTable) return null;
+  const allowExpired = options.allowExpired === true;
 
   try {
     const { data, error } = await client
@@ -922,7 +931,8 @@ async function readVenueCache(client, cacheKey) {
     if (!row) return null;
 
     const expiresAtMs = Date.parse(row.expires_at || '');
-    if (!Number.isFinite(expiresAtMs) || expiresAtMs <= Date.now()) return null;
+    const isExpired = !Number.isFinite(expiresAtMs) || expiresAtMs <= Date.now();
+    if (isExpired && !allowExpired) return null;
 
     return Array.isArray(row.venues_json) ? row.venues_json : [];
   } catch (error) {
@@ -933,6 +943,137 @@ async function readVenueCache(client, cacheKey) {
     console.error('venues_cache read error:', error?.message || error);
     return null;
   }
+}
+
+async function fetchJsonWithTimeout(url, options = {}, timeoutMs = 2500) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    });
+    const rawText = await response.text();
+
+    if (!response.ok) {
+      const error = new Error(`HTTP ${response.status}`);
+      error.status = response.status;
+      error.body = rawText;
+      throw error;
+    }
+
+    if (!rawText) return null;
+    return JSON.parse(rawText);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function resolveCityCenter(cityName) {
+  const query = new URLSearchParams({
+    q: cityName,
+    format: 'jsonv2',
+    limit: '1',
+    addressdetails: '1',
+  });
+
+  const url = `${NOMINATIM_ENDPOINT}?${query.toString()}`;
+  const json = await fetchJsonWithTimeout(url, {
+    headers: {
+      Accept: 'application/json',
+      'Accept-Language': 'tr,en',
+      'User-Agent': OSM_HTTP_USER_AGENT,
+    },
+  }, NOMINATIM_REQUEST_TIMEOUT_MS);
+
+  const first = Array.isArray(json) ? json[0] : null;
+  const latitude = toFiniteNumber(first?.lat);
+  const longitude = toFiniteNumber(first?.lon);
+
+  if (!isValidLatitude(latitude) || !isValidLongitude(longitude)) {
+    return null;
+  }
+  return { latitude, longitude };
+}
+
+function mapNominatimVenueItem(item) {
+  const placeId = item?.place_id;
+  if (!placeId) return null;
+
+  const latitude = toFiniteNumber(item?.lat);
+  const longitude = toFiniteNumber(item?.lon);
+  if (!isValidLatitude(latitude) || !isValidLongitude(longitude)) return null;
+
+  const displayName = normalizeVenueText(item?.display_name);
+  const firstPart = normalizeVenueText(displayName.split(',')[0]);
+  const name = normalizeVenueText(item?.name || firstPart);
+  if (!name) return null;
+
+  return {
+    id: `nominatim_${placeId}`,
+    osmId: `nominatim:${placeId}`,
+    name,
+    address: displayName || null,
+    latitude,
+    longitude,
+    source: 'OSM',
+  };
+}
+
+async function fetchVenuesFromNominatim({ cityName, sportId }) {
+  const sportTokens = resolveOsmSportTags(sportId);
+  const sportSearchTerm = sportTokens.length > 0
+    ? sportTokens.join(' ')
+    : normalizeVenueText(sportId);
+  const query = new URLSearchParams({
+    q: `${sportSearchTerm} ${cityName}`.trim(),
+    format: 'jsonv2',
+    limit: '90',
+    addressdetails: '1',
+    extratags: '1',
+  });
+
+  const url = `${NOMINATIM_ENDPOINT}?${query.toString()}`;
+  const json = await fetchJsonWithTimeout(url, {
+    headers: {
+      Accept: 'application/json',
+      'Accept-Language': 'tr,en',
+      'User-Agent': OSM_HTTP_USER_AGENT,
+    },
+  }, NOMINATIM_REQUEST_TIMEOUT_MS);
+
+  const items = Array.isArray(json) ? json : [];
+  const sportTokenSet = new Set(sportTokens);
+  const dedupe = new Set();
+  const venues = [];
+
+  for (const item of items) {
+    const mapped = mapNominatimVenueItem(item);
+    if (!mapped) continue;
+
+    const classToken = normalizeVenueToken(item?.class);
+    const typeToken = normalizeVenueToken(item?.type);
+    const addressToken = normalizeVenueToken(item?.display_name);
+    const hasSportHint = [...sportTokenSet].some(token => token && addressToken.includes(token));
+    const isVenueLike = classToken === 'leisure'
+      || classToken === 'amenity'
+      || classToken === 'sport'
+      || typeToken.includes('stadium')
+      || typeToken.includes('pitch')
+      || typeToken.includes('sports')
+      || typeToken.includes('fitness');
+
+    if (!isVenueLike && !hasSportHint) continue;
+
+    const key = `${mapped.name.toLocaleLowerCase('tr-TR')}::${mapped.latitude.toFixed(5)}::${mapped.longitude.toFixed(5)}`;
+    if (dedupe.has(key)) continue;
+    dedupe.add(key);
+    venues.push(mapped);
+    if (venues.length >= MAX_VENUE_RESULTS) break;
+  }
+
+  return venues;
 }
 
 async function writeVenueCache(client, { cacheKey, cityName, sportId, venues }) {
@@ -967,43 +1108,71 @@ async function writeVenueCache(client, { cacheKey, cityName, sportId, venues }) 
 }
 
 async function fetchVenuesFromOverpass({ cityName, sportId }) {
-  const overpassQuery = buildOverpassVenueQuery({ cityName, sportId });
-  const payload = new URLSearchParams({ data: overpassQuery }).toString();
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), OVERPASS_REQUEST_TIMEOUT_MS);
-
-  try {
-    const response = await fetch(OVERPASS_ENDPOINT, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-      },
-      body: payload,
-      signal: controller.signal,
-    });
-
-    if (!response.ok) {
-      throw new Error(`Overpass status: ${response.status}`);
-    }
-
-    const json = await response.json();
-    const elements = Array.isArray(json?.elements) ? json.elements : [];
-    const dedupe = new Set();
-    const venues = [];
-
-    for (const element of elements) {
-      const mapped = mapOverpassVenueElement(element);
-      if (!mapped) continue;
-      if (dedupe.has(mapped.osmId)) continue;
-      dedupe.add(mapped.osmId);
-      venues.push(mapped);
-      if (venues.length >= MAX_VENUE_RESULTS) break;
-    }
-
-    return venues;
-  } finally {
-    clearTimeout(timeout);
+  const cityCenter = await resolveCityCenter(cityName);
+  if (!cityCenter) {
+    throw new Error(`City center could not be resolved: ${cityName}`);
   }
+
+  const overpassQuery = buildOverpassVenueQuery({
+    latitude: cityCenter.latitude,
+    longitude: cityCenter.longitude,
+    sportId,
+  });
+  const payload = new URLSearchParams({ data: overpassQuery }).toString();
+
+  let lastError = null;
+  for (const endpoint of OVERPASS_ENDPOINTS) {
+    try {
+      const json = await fetchJsonWithTimeout(endpoint, {
+        method: 'POST',
+        headers: {
+          Accept: 'application/json',
+          'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+          'User-Agent': OSM_HTTP_USER_AGENT,
+        },
+        body: payload,
+      }, OVERPASS_REQUEST_TIMEOUT_MS);
+
+      const elements = Array.isArray(json?.elements) ? json.elements : [];
+      const dedupe = new Set();
+      const venues = [];
+
+      for (const element of elements) {
+        const mapped = mapOverpassVenueElement(element);
+        if (!mapped) continue;
+        if (dedupe.has(mapped.osmId)) continue;
+        dedupe.add(mapped.osmId);
+        venues.push(mapped);
+        if (venues.length >= MAX_VENUE_RESULTS) break;
+      }
+
+      return venues;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  throw lastError || new Error('Overpass endpoints failed.');
+}
+
+async function fetchVenuesFromOsm({ cityName, sportId }) {
+  let overpassError = null;
+  try {
+    const overpassVenues = await fetchVenuesFromOverpass({ cityName, sportId });
+    if (overpassVenues.length > 0) {
+      return { source: 'osm-overpass', venues: overpassVenues };
+    }
+  } catch (error) {
+    overpassError = error;
+  }
+
+  const nominatimVenues = await fetchVenuesFromNominatim({ cityName, sportId });
+  if (nominatimVenues.length > 0) {
+    return { source: 'osm-nominatim', venues: nominatimVenues };
+  }
+
+  if (overpassError) throw overpassError;
+  return { source: 'osm-nominatim', venues: [] };
 }
 
 function getListingCoordinates(listing) {
@@ -1731,15 +1900,41 @@ app.get('/api/venues', authMiddleware, async (req, res) => {
       return res.json({ success: true, source: 'cache', data: cached });
     }
 
-    const venues = await fetchVenuesFromOverpass({ cityName, sportId });
-    await writeVenueCache(client, {
-      cacheKey,
-      cityName,
-      sportId,
-      venues,
-    });
+    const staleCached = await readVenueCache(client, cacheKey, { allowExpired: true });
 
-    res.json({ success: true, source: 'osm', data: venues });
+    try {
+      const osmResult = await fetchVenuesFromOsm({ cityName, sportId });
+      const venues = Array.isArray(osmResult.venues) ? osmResult.venues : [];
+
+      await writeVenueCache(client, {
+        cacheKey,
+        cityName,
+        sportId,
+        venues,
+      });
+
+      return res.json({
+        success: true,
+        source: osmResult.source,
+        data: venues,
+      });
+    } catch (error) {
+      console.error('venues osm fetch error:', error?.message || error);
+
+      if (Array.isArray(staleCached) && staleCached.length > 0) {
+        return res.json({
+          success: true,
+          source: 'stale-cache',
+          data: staleCached,
+        });
+      }
+
+      return res.json({
+        success: true,
+        source: 'fallback-empty',
+        data: [],
+      });
+    }
   } catch (e) {
     console.error('venues endpoint error:', e?.message || e);
     res.status(500).json({ message: 'Tesisler alınamadı.' });
