@@ -1766,7 +1766,7 @@ app.get('/api/discovery/globe', authMiddleware, async (req, res) => {
     const client = db.raw();
     const { data, error } = await client
       .from('listings')
-      .select('id,sport_id,sport_name,city_name,country_code,latitude,longitude,created_at,status')
+      .select('id,user_id,sport_id,sport_name,city_name,latitude,longitude,created_at,status')
       .in('status', ['ACTIVE', 'MATCHED', 'COMPLETED'])
       .gte('created_at', windowStartIso)
       .order('created_at', { ascending: false })
@@ -1777,6 +1777,28 @@ app.get('/api/discovery/globe', authMiddleware, async (req, res) => {
     }
 
     const rows = data || [];
+    const listingUserIds = [...new Set(
+      rows
+        .filter(row => row?.user_id)
+        .map(row => row.user_id)
+    )];
+
+    const userCountryById = new Map();
+    if (listingUserIds.length > 0) {
+      const { data: userRows, error: userRowsError } = await client
+        .from('users')
+        .select('id,country_code')
+        .in('id', listingUserIds);
+
+      if (userRowsError) {
+        console.error('discovery/globe users country read error:', userRowsError.message || userRowsError);
+      } else {
+        for (const userRow of (userRows || [])) {
+          userCountryById.set(userRow.id, normalizeCountryCode(userRow.country_code));
+        }
+      }
+    }
+
     const hotspotsByKey = new Map();
     const topSportsById = new Map();
     const activeCityKeys = new Set();
@@ -1804,7 +1826,7 @@ app.get('/api/discovery/globe', authMiddleware, async (req, res) => {
       geoTaggedListings += 1;
 
       const cityName = normalizeVenueText(row.city_name || 'Unknown');
-      const countryCode = normalizeCountryCode(row.country_code);
+  const countryCode = normalizeCountryCode(userCountryById.get(row.user_id));
       const roundedLat = roundCoordinate(latitude);
       const roundedLon = roundCoordinate(longitude);
 
