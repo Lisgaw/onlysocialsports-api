@@ -1,0 +1,260 @@
+﻿'use strict';
+/**
+ * Sports Partner API ÔÇö Production Server (Supabase-backed)
+ *
+ * Vercel Serverless Function entry point.
+ * ALL routes use Supabase PostgreSQL instead of in-memory store.
+ * WebSocket NOT supported on Vercel ÔÇö HTTP-only.
+ */
+
+const express    = require('express');
+const cors       = require('cors');
+const helmet     = require('helmet');
+const bcrypt     = require('bcryptjs');
+const { v4: uuid } = require('uuid');
+const compression = require('compression');
+
+// ÔöÇÔöÇ Supabase ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+const db = require('../db/supabase');
+const { toCamel, toSnake, toUserResponse, fromUserBody, parsePagination } = require('../db/helpers');
+const { generateTokens, verifyRefreshToken, authMiddleware } = require('../middleware/auth');
+
+let contentFilterFn;
+try { contentFilterFn = require('../middleware/content-filter').contentFilter; } catch { contentFilterFn = null; }
+const contentFilter = contentFilterFn || ((..._f) => (_req, _res, next) => next());
+
+const app = express();
+
+// ÔöÇÔöÇ Middleware ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+// compression removed ÔÇö Vercel CDN handles gzip/brotli automatically
+app.use(helmet({
+  contentSecurityPolicy: false,
+  crossOriginResourcePolicy: false,  // CORP: same-origin Flutter web'i engelliyordu
+  crossOriginOpenerPolicy: false,    // COOP: same-origin Flutter web'i engelliyordu
+}));
+app.use(cors({
+  origin: '*',
+  methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE', 'OPTIONS'],
+  allowedHeaders: [
+    'Content-Type', 'Authorization',
+    'X-API-Version', 'X-Client-Type',  // Flutter custom headers
+  ],
+  exposedHeaders: ['Content-Length'],
+  optionsSuccessStatus: 204,
+}));
+// OPTIONS preflight isteklerini hemen yan─▒tla (helmet/cors ├Ânce ele al─▒r)
+app.options('*', cors());
+app.use(express.json({ limit: '500kb' }));
+
+// ÔöÇÔöÇ Rate Limiting (in-memory, per-instance) ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+const RATE_LIMIT_MAX = parseInt(process.env.RATE_LIMIT_MAX) || 300;
+const rateBuckets = new Map();
+app.use((req, res, next) => {
+  const ip = req.headers['x-forwarded-for'] || req.ip || 'unknown';
+  const now = Date.now();
+  let bucket = rateBuckets.get(ip);
+  if (!bucket || now - bucket.start > 60000) {
+    bucket = { start: now, count: 0 };
+    rateBuckets.set(ip, bucket);
+  }
+  bucket.count++;
+  if (bucket.count > RATE_LIMIT_MAX) return res.status(429).json({ message: 'Rate limit exceeded.' });
+  next();
+});
+// setInterval removed ÔÇö serverless functions don't persist between invocations
+// Rate buckets auto-expire via the check in the middleware above
+
+// ÔöÇÔöÇ Brute Force Protection ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+const loginAttempts = new Map();
+const LOGIN_MAX = 5;
+const LOGIN_WINDOW = 15 * 60 * 1000;
+
+// ÔöÇÔöÇ Helpers ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+function sanitize(obj) {
+  if (!obj || typeof obj !== 'object') return obj;
+  const r = {};
+  for (const [k, v] of Object.entries(obj))
+    r[k] = typeof v === 'string' ? v.replace(/[<>]/g, '') : v;
+  return r;
+}
+
+const SOCIAL_PLATFORMS = [
+  'instagram','tiktok','facebook','twitter','youtube','linkedin',
+  'discord','twitch','snapchat','telegram','whatsapp','vk','litmatch'
+];
+const BOT_SOCIAL_PLATFORM_POOL = ['instagram', 'youtube', 'telegram', 'vk', 'tiktok', 'twitter'];
+
+function hashText(seed = '') {
+  let h = 0;
+  const s = String(seed || '');
+  for (let i = 0; i < s.length; i++) {
+    h = (h << 5) - h + s.charCodeAt(i);
+    h |= 0;
+  }
+  return Math.abs(h);
+}
+
+function seededInt(seed, min, max) {
+  const lo = Number(min);
+  const hi = Number(max);
+  if (!Number.isFinite(lo) || !Number.isFinite(hi) || hi <= lo) return lo;
+  return lo + (hashText(seed) % (hi - lo + 1));
+}
+
+function normalizedHandleBase(name) {
+  const raw = String(name || '').replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+  return raw.length >= 3 ? raw : 'sportbot';
+}
+
+function buildBotSocialLinks({ botName, citySeed, countryCode, botIndex = 0, botId = '' }) {
+  const links = {};
+  for (const p of SOCIAL_PLATFORMS) links[p] = null;
+
+  const seedBase = `${botId}-${botName}-${citySeed}-${countryCode || ''}-${botIndex}`;
+  const base = normalizedHandleBase(botName);
+  const selectedPlatforms = [...BOT_SOCIAL_PLATFORM_POOL]
+    .sort((a, b) => hashText(`${seedBase}-${a}`) - hashText(`${seedBase}-${b}`))
+    .slice(0, 3);
+
+  for (const platform of selectedPlatforms) {
+    const suffix = seededInt(`${seedBase}-${platform}-suffix`, 100, 99999);
+    links[platform] = `${base}_${suffix}`.slice(0, 28);
+  }
+  return links;
+}
+
+function buildBotAudience({ botName, citySeed, countryCode, botIndex = 0, botId = '' }) {
+  const seedBase = `${botId}-${botName}-${citySeed}-${countryCode || ''}-${botIndex}`;
+  return {
+    followerCount: seededInt(`${seedBase}-followers`, 400, 500),
+    followingCount: seededInt(`${seedBase}-following`, 400, 500),
+  };
+}
+
+function countBotSocialLinks(row) {
+  let count = 0;
+  for (const p of SOCIAL_PLATFORMS) {
+    const v = row?.[p];
+    const hasValue = typeof v === 'string' ? v.trim().length > 0 : !!v;
+    if (hasValue) count++;
+  }
+  return count;
+}
+
+function buildBotPublicPersona({ botName, citySeed, countryCode, botIndex = 0, botId = '' }) {
+  const socialLinks = buildBotSocialLinks({ botName, citySeed, countryCode, botIndex, botId });
+  const audience = buildBotAudience({ botName, citySeed, countryCode, botIndex, botId });
+  return {
+    socialLinks,
+    followerCount: audience.followerCount,
+    followingCount: audience.followingCount,
+  };
+}
+
+const REQUIRED_LISTING_SPORTS = [
+  { id: 'okey', name: 'Okey', icon: '­şÇä', category: 'Masa Sporlar─▒' },
+  { id: 'tavla', name: 'Tavla', icon: '­şÄ▓', category: 'Masa Sporlar─▒' },
+  { id: 'satranc', name: 'Satran├ğ', icon: 'ÔÖş´©Å', category: 'Masa Sporlar─▒' },
+];
+
+let requiredListingSportsEnsured = false;
+
+async function ensureRequiredListingSports() {
+  if (requiredListingSportsEnsured) return;
+
+  try {
+    const client = db.raw();
+    if (!client) return;
+
+    const requiredIds = REQUIRED_LISTING_SPORTS.map(item => item.id);
+    const { data: existing, error: readError } = await client
+      .from('sports')
+      .select('id')
+      .in('id', requiredIds);
+    if (readError) throw readError;
+
+    const existingIds = new Set((existing || []).map(row => row.id));
+    const missing = REQUIRED_LISTING_SPORTS.filter(item => !existingIds.has(item.id));
+    if (missing.length === 0) {
+      requiredListingSportsEnsured = true;
+      return;
+    }
+
+    const { error: insertError } = await client.from('sports').insert(
+      missing.map(item => ({
+        id: item.id,
+        name: item.name,
+        icon: item.icon,
+        category: item.category,
+      }))
+    );
+
+    // Unique conflict olursa ba┼şka bir request ayn─▒ anda eklemi┼ş olabilir.
+    if (insertError && insertError.code !== '23505') throw insertError;
+
+    requiredListingSportsEnsured = true;
+  } catch (error) {
+    console.error('ensureRequiredListingSports error:', error?.message || error);
+  }
+}
+
+function buildBotBaselinePatch({ bot, eco, botIndex = 0 }) {
+  const patch = {};
+  const seedCity = bot.city_id || eco.city_id || bot.city || eco.city_name || 'city';
+  const persona = buildBotPublicPersona({
+    botName: bot.name,
+    citySeed: seedCity,
+    countryCode: bot.country_code || eco.country_code,
+    botIndex,
+    botId: bot.id,
+  });
+
+  const followerCount = Number(bot.follower_count || 0);
+  if (followerCount < 400 || followerCount > 500) {
+    patch.follower_count = persona.followerCount;
+  }
+  const followingCount = Number(bot.following_count || 0);
+  if (followingCount < 400 || followingCount > 500) {
+    patch.following_count = persona.followingCount;
+  }
+
+  let socialCount = countBotSocialLinks(bot);
+  if (socialCount < 3) {
+    for (const platform of BOT_SOCIAL_PLATFORM_POOL) {
+      const existing = bot[platform];
+      const hasExisting = typeof existing === 'string' ? existing.trim().length > 0 : !!existing;
+      if (hasExisting) continue;
+
+      const candidate = persona.socialLinks[platform];
+      if (!candidate) continue;
+      patch[platform] = candidate;
+      socialCount++;
+      if (socialCount >= 3) break;
+    }
+  }
+
+  return patch;
+}
+
+function normalizeVisibility(v, fallback = 'EVERYONE') {
+  const raw = String(v || '').toUpperCase();
+  if (raw === 'PUBLIC' || raw === 'EVERYONE') return 'EVERYONE';
+  if (raw === 'FOLLOWERS' || raw === 'FRIENDS' || raw === 'PRIVATE') return 'FOLLOWERS';
+  if (raw === 'NOBODY' || raw === 'NONE') return 'NOBODY';
+  return fallback;
+}
+
+function normalizePrivacy(input = {}) {
+  const socialRaw = input.socialPlatformVisibility && typeof input.socialPlatformVisibility === 'object'
+    ? input.socialPlatformVisibility : {};
+  const socialPlatformVisibility = {};
+  for (const p of SOCIAL_PLATFORMS)
+    socialPlatformVisibility[p] = normalizeVisibility(
+      socialRaw[p],
+      normalizeVisibility(input.socialLinksVisibility, 'EVERYONE')
+    );
+  return {
+    profileVisibility: normalizeVisibility(input.profileVisibility, 'EVERYONE'),
+    showOnlineStatus: input.showOnlineStatus !== false,
+    allowMessages: normalizeVisibility(input.allowMessages || input.whoCanMessage, 'EVERYONE'),
+    showLocation: input.showLocation !== false,
