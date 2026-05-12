@@ -161,7 +161,7 @@ const REQUIRED_LISTING_SPORTS = [
 const SPORT_ICON_UPDATES = [
   { id: 'hiking', icon: '🚶' },
   { id: 'skateboarding', icon: '🏂' },
-  { id: 'okey', icon: '🎴' },
+  { id: 'okey', icon: '�' },
 ];
 
 let sportIconsEnsured = false;
