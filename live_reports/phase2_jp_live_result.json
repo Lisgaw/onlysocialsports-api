@@ -1,0 +1,87 @@
+{
+  "phase": "phase-2-live-jp-ecosystem-validation",
+  "baseUrl": "https://api.onlysocialsport.com/api",
+  "checkStatus": [
+    {
+      "step": "admin-login",
+      "ok": true,
+      "status": 200
+    },
+    {
+      "step": "create-jp-ecosystem",
+      "ok": true,
+      "status": 200
+    },
+    {
+      "step": "admin-users-fetch",
+      "ok": true,
+      "status": 200
+    },
+    {
+      "step": "admin-listings-fetch",
+      "ok": true,
+      "status": 200
+    }
+  ],
+  "summary": {
+    "ecosystemId": "eco_e9804636-7601-4d68-85f9-3bd69c1f6aee",
+    "cityId": "jp_xhwxju",
+    "cityName": "Tokyo xhwxju",
+    "foundBots": 4,
+    "foundListings": 3,
+    "avatarSamples": [
+      {
+        "id": "bot_aee47264-53f0-416d-a823-cbb25281b533",
+        "avatarUrl": "https://randomuser.me/api/portraits/women/54.jpg"
+      },
+      {
+        "id": "bot_6081cfbd-c1e1-48f2-a7fe-63d11c9a5ae6",
+        "avatarUrl": "https://randomuser.me/api/portraits/women/68.jpg"
+      },
+      {
+        "id": "bot_7726d752-51e7-4509-8a88-a7c00a567a53",
+        "avatarUrl": "https://randomuser.me/api/portraits/women/70.jpg"
+      },
+      {
+        "id": "bot_a65e6643-3f82-42bd-b184-172b6f22e884",
+        "avatarUrl": "https://randomuser.me/api/portraits/men/63.jpg"
+      }
+    ],
+    "sportSamples": [
+      {
+        "id": "listing_aaa49ed7-29c6-4bd9-80bf-6664af1e781f",
+        "sportId": "table_tennis",
+        "sportName": "卓球"
+      },
+      {
+        "id": "listing_15d8464e-c0a0-4b8b-8b49-3b64a46ba35e",
+        "sportId": "table_tennis",
+        "sportName": "卓球"
+      },
+      {
+        "id": "listing_dae429f9-f4ea-41a0-b14c-cba3abb4df72",
+        "sportId": "table_tennis",
+        "sportName": "卓球"
+      }
+    ],
+    "checks": {
+      "humanAvatarPass": true,
+      "japaneseSportNamePass": true
+    }
+  },
+  "cleanup": [
+    {
+      "step": "delete-ecosystem",
+      "ecosystemId": "eco_e9804636-7601-4d68-85f9-3bd69c1f6aee",
+      "ok": true,
+      "status": 200,
+      "data": {
+        "message": "Tokyo xhwxju ekosistemi silindi. 4 bot temizlendi.",
+        "data": {
+          "botsRemoved": 4
+        }
+      }
+    }
+  ],
+  "error": null
+}

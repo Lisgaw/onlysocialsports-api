@@ -356,7 +356,7 @@ CREATE TABLE ratings (
   comment     TEXT,
   sport_id    TEXT REFERENCES sports(id),
   created_at  TIMESTAMPTZ DEFAULT NOW(),
-  UNIQUE(match_id, rater_id)
+  UNIQUE(match_id, rater_id, ratee_id)
 );
 
 CREATE INDEX idx_ratings_ratee ON ratings(ratee_id);

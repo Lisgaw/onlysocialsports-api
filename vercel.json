@@ -3,10 +3,9 @@
   "buildCommand": "npm install",
   "outputDirectory": ".",
   "framework": null,
-  "regions": ["fra1"],
   "functions": {
     "api/**/*.js": {
-      "maxDuration": 60,
+      "maxDuration": 10,
       "memory": 512
     }
   },

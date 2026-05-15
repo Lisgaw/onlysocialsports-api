@@ -1,8 +1,7 @@
 node_modules/
 .env
+.env.local
 .vercel/
 *.log
-store-snapshot.json
-load-test/
 .vercel
 .env*.local

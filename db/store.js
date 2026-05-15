@@ -13,7 +13,7 @@ const SPORTS = [
   { id: 'fitness',          name: 'Fitness',           icon: '💪',  category: 'Fitness ve Güç' },
   { id: 'swimming',         name: 'Yüzme',             icon: '🏊',  category: 'Su Sporları' },
   { id: 'running',          name: 'Koşu',              icon: '🏃',  category: 'Kardiyo' },
-  { id: 'hiking',           name: 'Yürüyüş',           icon: '🥾',  category: 'Doğa ve Outdoor' },
+  { id: 'hiking',           name: 'Yürüyüş',           icon: '🚶',  category: 'Doğa ve Outdoor' },
   { id: 'yoga',             name: 'Yoga',              icon: '🧘',  category: 'Esneklik ve Zihin' },
   { id: 'pilates',          name: 'Pilates',           icon: '🤸',  category: 'Esneklik ve Zihin' },
   { id: 'cricket',          name: 'Kriket',            icon: '🏏',  category: 'Top Sporları' },
@@ -30,7 +30,7 @@ const SPORTS = [
   { id: 'rugby',            name: 'Rugby',             icon: '🏉',  category: 'Top Sporları' },
   { id: 'ice_hockey',       name: 'Buz Hokeyi',        icon: '🏒',  category: 'Kış Sporları' },
   { id: 'handball',         name: 'Hentbol',           icon: '🤾',  category: 'Top Sporları' },
-  { id: 'skateboarding',    name: 'Kaykay',            icon: '🛹',  category: 'Urban Sporlar' },
+  { id: 'skateboarding',    name: 'Kaykay',            icon: '🏂',  category: 'Urban Sporlar' },
   { id: 'skating',          name: 'Paten',             icon: '⛸️', category: 'Urban Sporlar' },
   { id: 'surfing',          name: 'Sörf',              icon: '🏄',  category: 'Su Sporları' },
   { id: 'crossfit',         name: 'Crossfit',          icon: '🏋️', category: 'Fitness ve Güç' },
@@ -41,6 +41,10 @@ const SPORTS = [
   { id: 'fishing',          name: 'Balık Tutma',       icon: '🎣',  category: 'Su Sporları' },
   { id: 'paintball',        name: 'Paintball',         icon: '🔫',  category: 'Aksiyon Sporları' },
   { id: 'dance',            name: 'Dans',              icon: '💃',  category: 'Müzik ve Dans' },
+  { id: 'okey',             name: 'Okey',              icon: '🃏',  category: 'Masa Sporları' },
+  { id: 'tavla',            name: 'Tavla',             icon: '🎲',  category: 'Masa Sporları' },
+  { id: 'satranc',          name: 'Satranç',           icon: '♟️', category: 'Masa Sporları' },
+  { id: 'karting',          name: 'Karting',           icon: '🏎️', category: 'Motor Sporları' },
 ];
 
 // ─── Şehir / İlçe ─────────────────────────────────────────────────────────────

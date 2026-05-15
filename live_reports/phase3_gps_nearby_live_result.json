@@ -1,0 +1,74 @@
+{
+  "phase": "phase-3-live-gps-listing-and-nearby-validation",
+  "baseUrl": "https://api.onlysocialsport.com/api",
+  "checkStatus": [
+    {
+      "step": "admin-login",
+      "ok": true,
+      "status": 200
+    },
+    {
+      "step": "sports-fetch",
+      "ok": true,
+      "status": 200
+    },
+    {
+      "step": "register-user",
+      "ok": true,
+      "status": 201
+    },
+    {
+      "step": "create-listing-with-gps-fields",
+      "ok": true,
+      "status": 201
+    },
+    {
+      "step": "listing-detail",
+      "ok": true,
+      "status": 200
+    },
+    {
+      "step": "listings-query-with-gps-params",
+      "ok": true,
+      "status": 200
+    },
+    {
+      "step": "nearby-endpoint-probe",
+      "ok": true,
+      "status": 200
+    }
+  ],
+  "summary": {
+    "listingId": "listing_391d4fc1-73ab-4b9f-8c03-79e45d759138",
+    "createStatus": 201,
+    "listingLatitude": 41.0082,
+    "listingLongitude": 28.9784,
+    "gpsPersisted": true,
+    "listWithGpsStatus": 200,
+    "listWithGpsHasDistanceField": true,
+    "nearbyStatus": 200,
+    "nearbyMessage": null,
+    "nearbyFeatureExists": true
+  },
+  "cleanup": [
+    {
+      "step": "delete-listing",
+      "listingId": "listing_391d4fc1-73ab-4b9f-8c03-79e45d759138",
+      "ok": true,
+      "status": 200,
+      "data": {
+        "message": "İlan silindi."
+      }
+    },
+    {
+      "step": "delete-user",
+      "userId": "user_b84c7875-f557-4a85-8e2e-d367348fca9a",
+      "ok": true,
+      "status": 200,
+      "data": {
+        "message": "Kullanıcı silindi."
+      }
+    }
+  ],
+  "error": null
+}
