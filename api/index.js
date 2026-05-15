@@ -793,12 +793,43 @@ const INVALID_PUSH_TOKEN_ERRORS = new Set([
   'registration-token-not-registered',
   'UNREGISTERED',
 ]);
+const PUSH_TELEMETRY_ENABLED = new Set(['1', 'true', 'yes', 'on']).has(
+  String(process.env.PUSH_TELEMETRY_LOG || process.env.PUSH_TELEMETRY_ENABLED || '')
+    .trim()
+    .toLowerCase(),
+);
 
 let firebaseServiceAccountCache;
 let firebaseAccessTokenCache = {
   token: '',
   expiresAt: 0,
 };
+
+function maskPushTokenForLogs(token) {
+  const clean = normalizePushToken(token);
+  if (!clean) return '';
+  if (clean.length <= 12) return clean;
+  return `${clean.slice(0, 8)}...${clean.slice(-4)}`;
+}
+
+function clipForLogs(value, max = 220) {
+  const text = String(value || '');
+  if (text.length <= max) return text;
+  return `${text.slice(0, max)}...`;
+}
+
+function logPushTelemetry(event, payload = {}) {
+  if (!PUSH_TELEMETRY_ENABLED) return;
+  try {
+    console.log('[PUSH_TELEMETRY]', JSON.stringify({
+      event,
+      ts: new Date().toISOString(),
+      ...payload,
+    }));
+  } catch (error) {
+    console.log('[PUSH_TELEMETRY]', event, payload, error?.message || error);
+  }
+}
 
 function normalizePushToken(token) {
   if (typeof token !== 'string') return '';
@@ -1276,10 +1307,37 @@ async function deactivateInvalidPushToken({ userId, token }) {
 
 async function sendPushForNotification(notif) {
   const provider = resolvePushProvider();
-  if (!provider) return { sent: 0, attempted: 0, reason: 'provider_not_configured' };
+  const providerMode = provider?.mode || 'none';
+
+  if (!provider) {
+    logPushTelemetry('send_skipped', {
+      notificationId: notif.id,
+      userId: notif.user_id,
+      notifType: notif.type,
+      providerMode,
+      reason: 'provider_not_configured',
+    });
+    return { sent: 0, attempted: 0, reason: 'provider_not_configured' };
+  }
 
   const tokenResult = await listActivePushTokens(notif.user_id, 10);
+  logPushTelemetry('send_start', {
+    notificationId: notif.id,
+    userId: notif.user_id,
+    notifType: notif.type,
+    providerMode,
+    tokenCount: tokenResult.tokens.length,
+    tokenQueryReason: tokenResult.reason || 'ok',
+  });
+
   if (!tokenResult.tokens.length) {
+    logPushTelemetry('send_skipped', {
+      notificationId: notif.id,
+      userId: notif.user_id,
+      notifType: notif.type,
+      providerMode,
+      reason: tokenResult.reason || 'no_tokens',
+    });
     return { sent: 0, attempted: 0, reason: tokenResult.reason || 'no_tokens' };
   }
 
@@ -1307,6 +1365,18 @@ async function sendPushForNotification(notif) {
         data: pushData,
       });
 
+    logPushTelemetry('send_attempt', {
+      notificationId: notif.id,
+      userId: notif.user_id,
+      providerMode,
+      attempt: attemptedCount,
+      platform: row.platform || 'unknown',
+      token: maskPushTokenForLogs(token),
+      ok: !!result.ok,
+      code: result.code || 'unknown',
+      message: clipForLogs(result.message || ''),
+    });
+
     if (result.ok) {
       sentCount += 1;
       continue;
@@ -1314,6 +1384,13 @@ async function sendPushForNotification(notif) {
 
     if (INVALID_PUSH_TOKEN_ERRORS.has(result.code)) {
       await deactivateInvalidPushToken({ userId: notif.user_id, token });
+      logPushTelemetry('token_deactivated', {
+        notificationId: notif.id,
+        userId: notif.user_id,
+        providerMode,
+        token: maskPushTokenForLogs(token),
+        reason: result.code || 'invalid_token_code',
+      });
       continue;
     }
 
@@ -1325,6 +1402,13 @@ async function sendPushForNotification(notif) {
       (msg.includes('registration token') && msg.includes('not valid'))
     ) {
       await deactivateInvalidPushToken({ userId: notif.user_id, token });
+      logPushTelemetry('token_deactivated', {
+        notificationId: notif.id,
+        userId: notif.user_id,
+        providerMode,
+        token: maskPushTokenForLogs(token),
+        reason: 'message_contains_unregistered',
+      });
       continue;
     }
 
@@ -1336,11 +1420,23 @@ async function sendPushForNotification(notif) {
     });
   }
 
-  return {
+  const summary = {
     sent: sentCount,
     attempted: attemptedCount,
     reason: sentCount > 0 ? 'sent' : 'failed',
   };
+
+  logPushTelemetry('send_summary', {
+    notificationId: notif.id,
+    userId: notif.user_id,
+    notifType: notif.type,
+    providerMode,
+    attempted: summary.attempted,
+    sent: summary.sent,
+    reason: summary.reason,
+  });
+
+  return summary;
 }
 
 async function userById(id) { return id ? await db.findById('users', id) : null; }
@@ -5591,6 +5687,14 @@ async function handlePushToken(req, res) {
     const token = normalizePushToken(req.body?.token);
     const platform = normalizePushPlatform(req.body?.platform);
 
+    logPushTelemetry('token_request', {
+      userId: req.userId,
+      action,
+      platform,
+      token: maskPushTokenForLogs(token),
+      tokenLength: token.length,
+    });
+
     if (action !== 'register' && action !== 'unregister') {
       return res.status(400).json({ message: 'GeÃ§ersiz action. register veya unregister olmalÄ±.' });
     }
@@ -5601,6 +5705,14 @@ async function handlePushToken(req, res) {
       }
 
       const result = await upsertPushToken({ userId: req.userId, token, platform });
+      logPushTelemetry('token_result', {
+        userId: req.userId,
+        action,
+        platform,
+        stored: !!result.stored,
+        reason: result.reason || 'ok',
+      });
+
       if (!result.stored && result.reason === 'missing_table') {
         return res.status(202).json({
           message: 'Push token alÄ±ndÄ± fakat push_tokens tablosu henÃ¼z oluÅŸturulmamÄ±ÅŸ.',
@@ -5611,6 +5723,14 @@ async function handlePushToken(req, res) {
     }
 
     const result = await deactivatePushToken({ userId: req.userId, token });
+    logPushTelemetry('token_result', {
+      userId: req.userId,
+      action,
+      platform,
+      stored: !!result.stored,
+      reason: result.reason || 'ok',
+    });
+
     if (!result.stored && result.reason === 'missing_table') {
       return res.status(202).json({ message: 'Push token kaldÄ±rma isteÄŸi alÄ±ndÄ±.' });
     }
@@ -5620,6 +5740,10 @@ async function handlePushToken(req, res) {
     });
   } catch (e) {
     console.error('push token error:', e);
+    logPushTelemetry('token_error', {
+      userId: req.userId,
+      error: clipForLogs(e?.message || e),
+    });
     return res.status(500).json({ message: 'Push token iÅŸlenemedi.' });
   }
 }
