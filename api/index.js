@@ -781,6 +781,125 @@ async function pushNotification(n) {
 }
 
 const PUSH_PLATFORM_ALLOWLIST = new Set(['android', 'ios', 'web']);
+const PUSH_LOCALE_ALLOWLIST = new Set(['tr', 'en', 'ar', 'de', 'es', 'fr', 'pt', 'ru', 'ja', 'zh', 'hi', 'bn']);
+const COUNTRY_TO_PUSH_LOCALE = Object.freeze({
+  TR: 'tr',
+  EN: 'en',
+  US: 'en',
+  GB: 'en',
+  AU: 'en',
+  CA: 'en',
+  IE: 'en',
+  NZ: 'en',
+  AR: 'ar',
+  SA: 'ar',
+  AE: 'ar',
+  DE: 'de',
+  AT: 'de',
+  CH: 'de',
+  ES: 'es',
+  MX: 'es',
+  FR: 'fr',
+  BE: 'fr',
+  PT: 'pt',
+  BR: 'pt',
+  RU: 'ru',
+  JA: 'ja',
+  JP: 'ja',
+  ZH: 'zh',
+  CN: 'zh',
+  TW: 'zh',
+  HI: 'hi',
+  IN: 'hi',
+  BN: 'bn',
+  BD: 'bn',
+});
+const DIRECT_CHALLENGE_COPY = Object.freeze({
+  tr: {
+    rivalTitle: '\u2694\uFE0F Rakip Teklifi!',
+    partnerTitle: '\uD83E\uDD1D Partner Teklifi!',
+    bodyTemplate: '{sender} sana {sport} teklifi gonderdi.',
+    senderFallback: 'Birisi',
+    sportFallback: 'spor',
+  },
+  en: {
+    rivalTitle: '\u2694\uFE0F Rival Offer!',
+    partnerTitle: '\uD83E\uDD1D Partner Offer!',
+    bodyTemplate: '{sender} sent you a {sport} offer.',
+    senderFallback: 'Someone',
+    sportFallback: 'sport',
+  },
+  ar: {
+    rivalTitle: '\u2694\uFE0F Rival Offer!',
+    partnerTitle: '\uD83E\uDD1D Partner Offer!',
+    bodyTemplate: '{sender} sent you a {sport} offer.',
+    senderFallback: 'Someone',
+    sportFallback: 'sport',
+  },
+  de: {
+    rivalTitle: '\u2694\uFE0F Rivalen-Angebot!',
+    partnerTitle: '\uD83E\uDD1D Partner-Angebot!',
+    bodyTemplate: '{sender} hat dir ein {sport}-Angebot gesendet.',
+    senderFallback: 'Jemand',
+    sportFallback: 'Sport',
+  },
+  es: {
+    rivalTitle: '\u2694\uFE0F Oferta de rival!',
+    partnerTitle: '\uD83E\uDD1D Oferta de companero!',
+    bodyTemplate: '{sender} te envio una oferta de {sport}.',
+    senderFallback: 'Alguien',
+    sportFallback: 'deporte',
+  },
+  fr: {
+    rivalTitle: '\u2694\uFE0F Offre de rival!',
+    partnerTitle: '\uD83E\uDD1D Offre de partenaire!',
+    bodyTemplate: '{sender} vous a envoye une offre de {sport}.',
+    senderFallback: 'Quelqu\'un',
+    sportFallback: 'sport',
+  },
+  pt: {
+    rivalTitle: '\u2694\uFE0F Oferta de rival!',
+    partnerTitle: '\uD83E\uDD1D Oferta de parceiro!',
+    bodyTemplate: '{sender} enviou uma oferta de {sport} para voce.',
+    senderFallback: 'Alguem',
+    sportFallback: 'esporte',
+  },
+  ru: {
+    rivalTitle: '\u2694\uFE0F Rival Offer!',
+    partnerTitle: '\uD83E\uDD1D Partner Offer!',
+    bodyTemplate: '{sender} sent you a {sport} offer.',
+    senderFallback: 'Someone',
+    sportFallback: 'sport',
+  },
+  ja: {
+    rivalTitle: '\u2694\uFE0F Rival Offer!',
+    partnerTitle: '\uD83E\uDD1D Partner Offer!',
+    bodyTemplate: '{sender} sent you a {sport} offer.',
+    senderFallback: 'Someone',
+    sportFallback: 'sport',
+  },
+  zh: {
+    rivalTitle: '\u2694\uFE0F Rival Offer!',
+    partnerTitle: '\uD83E\uDD1D Partner Offer!',
+    bodyTemplate: '{sender} sent you a {sport} offer.',
+    senderFallback: 'Someone',
+    sportFallback: 'sport',
+  },
+  hi: {
+    rivalTitle: '\u2694\uFE0F Rival Offer!',
+    partnerTitle: '\uD83E\uDD1D Partner Offer!',
+    bodyTemplate: '{sender} sent you a {sport} offer.',
+    senderFallback: 'Someone',
+    sportFallback: 'sport',
+  },
+  bn: {
+    rivalTitle: '\u2694\uFE0F Rival Offer!',
+    partnerTitle: '\uD83E\uDD1D Partner Offer!',
+    bodyTemplate: '{sender} sent you a {sport} offer.',
+    senderFallback: 'Someone',
+    sportFallback: 'sport',
+  },
+});
 const FCM_LEGACY_ENDPOINT = 'https://fcm.googleapis.com/fcm/send';
 const FCM_OAUTH_TOKEN_ENDPOINT = 'https://oauth2.googleapis.com/token';
 const FCM_OAUTH_SCOPE = 'https://www.googleapis.com/auth/firebase.messaging';
@@ -842,31 +961,97 @@ function normalizePushPlatform(platform) {
   return PUSH_PLATFORM_ALLOWLIST.has(normalized) ? normalized : 'android';
 }
 
+function normalizePushLocale(locale, fallback = '') {
+  const normalized = String(locale || '').trim().toLowerCase().split(/[-_]/)[0];
+  if (PUSH_LOCALE_ALLOWLIST.has(normalized)) return normalized;
+
+  const countryCode = String(locale || '').trim().toUpperCase();
+  if (COUNTRY_TO_PUSH_LOCALE[countryCode]) return COUNTRY_TO_PUSH_LOCALE[countryCode];
+
+  const normalizedFallback = String(fallback || '').trim().toLowerCase().split(/[-_]/)[0];
+  if (PUSH_LOCALE_ALLOWLIST.has(normalizedFallback)) return normalizedFallback;
+
+  return '';
+}
+
+function encodeLegacyPlatformWithLocale(platform, locale) {
+  const normalizedPlatform = normalizePushPlatform(platform);
+  const normalizedLocale = normalizePushLocale(locale, '');
+  if (!normalizedLocale) return normalizedPlatform;
+  return `${normalizedPlatform}|${normalizedLocale}`;
+}
+
+function decodeLegacyPlatformWithLocale(platformValue) {
+  const raw = String(platformValue || '').trim();
+  if (!raw) return { platform: 'android', locale: '' };
+
+  const [platformPart, localePart] = raw.split('|');
+  return {
+    platform: normalizePushPlatform(platformPart),
+    locale: normalizePushLocale(localePart, ''),
+  };
+}
+
+function isMissingColumn(error, columnName) {
+  const msg = String(error?.message || '').toLowerCase();
+  if (!msg) return false;
+
+  const column = String(columnName || '').toLowerCase();
+  if (column && !msg.includes(column)) return false;
+
+  return (
+    msg.includes('column') &&
+    (msg.includes('does not exist') || msg.includes('could not find'))
+  );
+}
+
 function isMissingPushTokensTable(error) {
   return isMissingTable(error, 'push_tokens');
 }
 
-async function upsertPushToken({ userId, token, platform }) {
+async function upsertPushToken({ userId, token, platform, locale = '' }) {
   const client = db.raw();
   if (!client) return { stored: false, reason: 'db_unavailable' };
 
   const cleanToken = normalizePushToken(token);
   if (!cleanToken) return { stored: false, reason: 'invalid_token' };
+  const normalizedPlatform = normalizePushPlatform(platform);
+  const normalizedLocale = normalizePushLocale(locale, '');
 
   const now = new Date().toISOString();
   const payload = {
     user_id: userId,
     token: cleanToken,
-    platform: normalizePushPlatform(platform),
+    platform: normalizedPlatform,
+    locale: normalizedLocale || null,
     is_active: true,
     updated_at: now,
     last_seen_at: now,
   };
 
-  const { error } = await client.from('push_tokens').upsert(payload, {
+  let localeStored = true;
+  let { error } = await client.from('push_tokens').upsert(payload, {
     onConflict: 'user_id,token',
     ignoreDuplicates: false,
   });
+
+  if (error && isMissingColumn(error, 'locale')) {
+    localeStored = false;
+    const legacyPayload = {
+      user_id: userId,
+      token: cleanToken,
+      platform: encodeLegacyPlatformWithLocale(normalizedPlatform, normalizedLocale),
+      is_active: true,
+      updated_at: now,
+      last_seen_at: now,
+    };
+
+    const retry = await client.from('push_tokens').upsert(legacyPayload, {
+      onConflict: 'user_id,token',
+      ignoreDuplicates: false,
+    });
+    error = retry.error;
+  }
 
   if (error) {
     if (isMissingPushTokensTable(error)) {
@@ -875,7 +1060,12 @@ async function upsertPushToken({ userId, token, platform }) {
     throw error;
   }
 
-  return { stored: true, reason: 'ok' };
+  return {
+    stored: true,
+    reason: localeStored ? 'ok' : 'ok_locale_column_missing',
+    locale: normalizedLocale || null,
+    localeStored,
+  };
 }
 
 async function deactivatePushToken({ userId, token = null }) {
@@ -1121,13 +1311,33 @@ async function listActivePushTokens(userId, limit = 10) {
   const client = db.raw();
   if (!client) return { tokens: [], reason: 'db_unavailable' };
 
-  const { data, error } = await client
+  let { data, error } = await client
     .from('push_tokens')
-    .select('token,platform')
+    .select('token,platform,locale')
     .eq('user_id', userId)
     .eq('is_active', true)
     .order('last_seen_at', { ascending: false })
     .limit(limit);
+
+  if (error && isMissingColumn(error, 'locale')) {
+    const fallback = await client
+      .from('push_tokens')
+      .select('token,platform')
+      .eq('user_id', userId)
+      .eq('is_active', true)
+      .order('last_seen_at', { ascending: false })
+      .limit(limit);
+
+    data = (fallback.data || []).map((row) => {
+      const decoded = decodeLegacyPlatformWithLocale(row.platform);
+      return {
+        token: row.token,
+        platform: decoded.platform,
+        locale: decoded.locale || null,
+      };
+    });
+    error = fallback.error;
+  }
 
   if (error) {
     if (isMissingPushTokensTable(error)) {
@@ -1136,7 +1346,68 @@ async function listActivePushTokens(userId, limit = 10) {
     throw error;
   }
 
-  return { tokens: data || [], reason: 'ok' };
+  const normalizedRows = (data || []).map((row) => {
+    const decoded = decodeLegacyPlatformWithLocale(row.platform);
+    return {
+      token: row.token,
+      platform: decoded.platform,
+      locale: normalizePushLocale(row.locale, '') || decoded.locale || null,
+    };
+  });
+
+  return { tokens: normalizedRows, reason: 'ok' };
+}
+
+function localizeSportNameForPush({ sportId = '', rawName = '', locale = '' }) {
+  const fallback = maybeString(rawName, 80) || 'sport';
+  const botAutomation = getBotAutomation();
+  if (!botAutomation?.translateSportName) return fallback;
+
+  try {
+    const localized = botAutomation.translateSportName(sportId, locale, fallback);
+    return maybeString(localized, 80) || fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+async function resolveUserPreferredPushLocale(userId, fallback = 'tr') {
+  const normalizedFallback = normalizePushLocale(fallback, 'tr') || 'tr';
+
+  try {
+    const tokenResult = await listActivePushTokens(userId, 1);
+    const tokenLocale = normalizePushLocale(tokenResult.tokens?.[0]?.locale, '');
+    if (tokenLocale) return tokenLocale;
+  } catch {
+    // ignore and continue fallback chain
+  }
+
+  try {
+    const user = await userById(userId);
+    const userLocale = normalizePushLocale(user?.country_code, '');
+    if (userLocale) return userLocale;
+  } catch {
+    // ignore and return fallback
+  }
+
+  return normalizedFallback;
+}
+
+function buildDirectChallengePushCopy({ locale = 'tr', challengeType = 'RIVAL', senderName = '', sportName = '' }) {
+  const lang = normalizePushLocale(locale, 'en') || 'en';
+  const copy = DIRECT_CHALLENGE_COPY[lang] || DIRECT_CHALLENGE_COPY.en;
+  const normalizedType = String(challengeType || 'RIVAL').toUpperCase() === 'PARTNER' ? 'PARTNER' : 'RIVAL';
+  const title = normalizedType === 'PARTNER' ? copy.partnerTitle : copy.rivalTitle;
+  const sender = maybeString(senderName, 80) || copy.senderFallback;
+  const sport = maybeString(sportName, 80) || copy.sportFallback;
+  const body = String(copy.bodyTemplate || '{sender} sent you a {sport} offer.')
+    .replace('{sender}', sender)
+    .replace('{sport}', sport);
+
+  return {
+    title,
+    body,
+  };
 }
 
 async function sendFcmLegacyMessage({ token, title, body, data }) {
@@ -1371,6 +1642,7 @@ async function sendPushForNotification(notif) {
       providerMode,
       attempt: attemptedCount,
       platform: row.platform || 'unknown',
+      locale: normalizePushLocale(row.locale, '') || null,
       token: maskPushTokenForLogs(token),
       ok: !!result.ok,
       code: result.code || 'unknown',
@@ -4293,11 +4565,24 @@ challengesRouter.post('/', contentFilter('message'), async (req, res) => {
 
     const me = await userById(req.userId);
     const sport = await db.findById('sports', sportId);
+    const targetLocale = await resolveUserPreferredPushLocale(targetId, 'tr');
+    const localizedSportName = localizeSportNameForPush({
+      sportId: sport?.id || sportId,
+      rawName: sport?.name || 'sport',
+      locale: targetLocale,
+    });
+    const challengeCopy = buildDirectChallengePushCopy({
+      locale: targetLocale,
+      challengeType: challenge.challenge_type,
+      senderName: me?.name || '',
+      sportName: localizedSportName,
+    });
+
     await pushNotification({
       userId: targetId,
       type: 'DIRECT_CHALLENGE',
-      title: `${challenge.challenge_type === 'RIVAL' ? 'âš”ï¸ Rakip' : 'ğŸ¤ Partner'} Teklifi!`,
-      body: `${me?.name || 'Birisi'} sana ${sport?.name || 'spor'} teklifi gÃ¶nderdi.`,
+      title: challengeCopy.title,
+      body: challengeCopy.body,
       relatedId: challenge.id, link: '/challenges',
       senderId: req.userId, senderName: me?.name, senderAvatar: me?.avatar_url,
     });
@@ -5686,11 +5971,16 @@ async function handlePushToken(req, res) {
     const action = String(req.body?.action || 'register').trim().toLowerCase();
     const token = normalizePushToken(req.body?.token);
     const platform = normalizePushPlatform(req.body?.platform);
+    const locale = normalizePushLocale(
+      req.body?.locale || req.body?.language || req.body?.languageCode,
+      '',
+    );
 
     logPushTelemetry('token_request', {
       userId: req.userId,
       action,
       platform,
+      locale: locale || null,
       token: maskPushTokenForLogs(token),
       tokenLength: token.length,
     });
@@ -5704,11 +5994,18 @@ async function handlePushToken(req, res) {
         return res.status(400).json({ message: 'GeÃ§ersiz push token.' });
       }
 
-      const result = await upsertPushToken({ userId: req.userId, token, platform });
+      const result = await upsertPushToken({
+        userId: req.userId,
+        token,
+        platform,
+        locale,
+      });
       logPushTelemetry('token_result', {
         userId: req.userId,
         action,
         platform,
+        locale: locale || null,
+        localeStored: result.localeStored !== false,
         stored: !!result.stored,
         reason: result.reason || 'ok',
       });
@@ -5719,7 +6016,10 @@ async function handlePushToken(req, res) {
         });
       }
 
-      return res.json({ message: 'Push token kaydedildi.' });
+      return res.json({
+        message: 'Push token kaydedildi.',
+        locale: locale || null,
+      });
     }
 
     const result = await deactivatePushToken({ userId: req.userId, token });

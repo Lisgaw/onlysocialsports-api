@@ -9,7 +9,8 @@
     "vercel-build": "echo 'No build needed'",
     "test:group-ratings": "node --test tests/group_ratings.integration.test.js",
     "migrate:007": "node scripts/run-migration-007.js",
-    "migrate:008": "node scripts/run-migration-008.js"
+    "migrate:008": "node scripts/run-migration-008.js",
+    "migrate:009": "node scripts/run-migration-009.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.0",
