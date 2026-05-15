@@ -20,6 +20,52 @@ const app    = express();
 const server = http.createServer(app);
 const wss    = new WebSocket.Server({ server });
 
+const DEFAULT_CORS_ALLOWED_ORIGINS = [
+  'https://onlysocialsport.com',
+  'https://www.onlysocialsport.com',
+  'https://api.onlysocialsport.com',
+  'http://localhost:3000',
+  'http://127.0.0.1:3000',
+  'http://localhost:5173',
+  'http://127.0.0.1:5173',
+  'http://localhost:8080',
+  'http://127.0.0.1:8080',
+];
+
+function splitAllowlist(raw) {
+  return String(raw || '')
+    .split(/[\n,;\s]+/)
+    .map(v => v.trim())
+    .filter(Boolean);
+}
+
+const CORS_ALLOW_ALL = String(process.env.CORS_ALLOW_ALL || '').trim().toLowerCase() === 'true';
+const CORS_ALLOWED_ORIGINS = (() => {
+  const envValues = splitAllowlist(process.env.CORS_ALLOWED_ORIGINS || process.env.CORS_ORIGIN_ALLOWLIST);
+  if (envValues.length > 0) return envValues;
+  return DEFAULT_CORS_ALLOWED_ORIGINS;
+})();
+
+function escapeRegex(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function originMatchesPattern(origin, pattern) {
+  if (!pattern) return false;
+  if (pattern === '*') return true;
+  if (!pattern.includes('*')) return origin === pattern;
+
+  const regex = new RegExp(`^${escapeRegex(pattern).replace(/\\\*/g, '.*')}$`);
+  return regex.test(origin);
+}
+
+function isOriginAllowed(origin) {
+  if (CORS_ALLOW_ALL) return true;
+  if (!origin) return true;
+
+  return CORS_ALLOWED_ORIGINS.some((allowedOrigin) => originMatchesPattern(origin, allowedOrigin));
+}
+
 // WebSocket clients map: userId → ws
 const wsClients = new Map();
 
@@ -47,7 +93,15 @@ app.use(helmet({
   xssFilter: true,
   referrerPolicy: { policy: 'no-referrer' },
 }));
-app.use(cors({ origin: '*' }));
+app.use(cors({
+  origin(origin, callback) {
+    const allowed = isOriginAllowed(origin);
+    if (!allowed && origin) {
+      console.warn('cors blocked origin:', origin);
+    }
+    callback(null, allowed);
+  },
+}));
 app.use(express.json({ limit: '50kb' }));
 
 // ─── Rate Limiting (in-memory, per IP) ─────────────────────────────────────────

@@ -1,10 +1,10 @@
-'use strict';
+﻿'use strict';
 /**
- * Sports Partner API — Production Server (Supabase-backed)
+ * Sports Partner API â€” Production Server (Supabase-backed)
  *
  * Vercel Serverless Function entry point.
  * ALL routes use Supabase PostgreSQL instead of in-memory store.
- * WebSocket NOT supported on Vercel — HTTP-only.
+ * WebSocket NOT supported on Vercel â€” HTTP-only.
  */
 
 const express    = require('express');
@@ -13,8 +13,10 @@ const helmet     = require('helmet');
 const bcrypt     = require('bcryptjs');
 const { v4: uuid } = require('uuid');
 const compression = require('compression');
+const crypto = require('node:crypto');
+const nodemailer = require('nodemailer');
 
-// ── Supabase ────────────────────────────────────────────────────────────────
+// â”€â”€ Supabase â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const db = require('../db/supabase');
 const { toCamel, toSnake, toUserResponse, fromUserBody, parsePagination } = require('../db/helpers');
 const { generateTokens, verifyRefreshToken, authMiddleware } = require('../middleware/auth');
@@ -25,28 +27,86 @@ const contentFilter = contentFilterFn || ((..._f) => (_req, _res, next) => next(
 
 const app = express();
 
-// ── Middleware ───────────────────────────────────────────────────────────────
-// compression removed — Vercel CDN handles gzip/brotli automatically
+const DEFAULT_CORS_ALLOWED_ORIGINS = [
+  'https://onlysocialsport.com',
+  'https://www.onlysocialsport.com',
+  'https://api.onlysocialsport.com',
+  'http://localhost:3000',
+  'http://127.0.0.1:3000',
+  'http://localhost:5173',
+  'http://127.0.0.1:5173',
+  'http://localhost:8080',
+  'http://127.0.0.1:8080',
+];
+
+function splitAllowlist(raw) {
+  return String(raw || '')
+    .split(/[\n,;\s]+/)
+    .map(v => v.trim())
+    .filter(Boolean);
+}
+
+const CORS_ALLOW_ALL = String(process.env.CORS_ALLOW_ALL || '').trim().toLowerCase() === 'true';
+const CORS_ALLOWED_ORIGINS = (() => {
+  const envValues = splitAllowlist(process.env.CORS_ALLOWED_ORIGINS || process.env.CORS_ORIGIN_ALLOWLIST);
+  if (envValues.length > 0) return envValues;
+  return DEFAULT_CORS_ALLOWED_ORIGINS;
+})();
+
+function escapeRegex(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function originMatchesPattern(origin, pattern) {
+  if (!pattern) return false;
+  if (pattern === '*') return true;
+  if (!pattern.includes('*')) return origin === pattern;
+
+  const regex = new RegExp(`^${escapeRegex(pattern).replace(/\\\*/g, '.*')}$`);
+  return regex.test(origin);
+}
+
+function isOriginAllowed(origin) {
+  if (CORS_ALLOW_ALL) return true;
+  if (!origin) return true; // Native mobile / server-to-server requests may omit Origin.
+
+  for (const allowedOrigin of CORS_ALLOWED_ORIGINS) {
+    if (originMatchesPattern(origin, allowedOrigin)) return true;
+  }
+
+  return false;
+}
+
+const corsOptions = {
+  origin(origin, callback) {
+    const allowed = isOriginAllowed(origin);
+    if (!allowed && origin) {
+      console.warn('cors blocked origin:', origin);
+    }
+    callback(null, allowed);
+  },
+  methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE', 'OPTIONS'],
+  allowedHeaders: [
+    'Content-Type', 'Authorization',
+    'X-API-Version', 'X-Client-Type',
+  ],
+  exposedHeaders: ['Content-Length'],
+  optionsSuccessStatus: 204,
+};
+
+// â”€â”€ Middleware â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// compression removed â€” Vercel CDN handles gzip/brotli automatically
 app.use(helmet({
   contentSecurityPolicy: false,
   crossOriginResourcePolicy: false,  // CORP: same-origin Flutter web'i engelliyordu
   crossOriginOpenerPolicy: false,    // COOP: same-origin Flutter web'i engelliyordu
 }));
-app.use(cors({
-  origin: '*',
-  methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE', 'OPTIONS'],
-  allowedHeaders: [
-    'Content-Type', 'Authorization',
-    'X-API-Version', 'X-Client-Type',  // Flutter custom headers
-  ],
-  exposedHeaders: ['Content-Length'],
-  optionsSuccessStatus: 204,
-}));
-// OPTIONS preflight isteklerini hemen yanıtla (helmet/cors önce ele alır)
-app.options('*', cors());
+app.use(cors(corsOptions));
+// OPTIONS preflight isteklerini hemen yanÄ±tla (helmet/cors Ã¶nce ele alÄ±r)
+app.options('*', cors(corsOptions));
 app.use(express.json({ limit: '500kb' }));
 
-// ── Rate Limiting (in-memory, per-instance) ─────────────────────────────────
+// â”€â”€ Rate Limiting (in-memory, per-instance) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const RATE_LIMIT_MAX = parseInt(process.env.RATE_LIMIT_MAX) || 300;
 const rateBuckets = new Map();
 app.use((req, res, next) => {
@@ -61,21 +121,248 @@ app.use((req, res, next) => {
   if (bucket.count > RATE_LIMIT_MAX) return res.status(429).json({ message: 'Rate limit exceeded.' });
   next();
 });
-// setInterval removed — serverless functions don't persist between invocations
+// setInterval removed â€” serverless functions don't persist between invocations
 // Rate buckets auto-expire via the check in the middleware above
 
-// ── Brute Force Protection ──────────────────────────────────────────────────
+// â”€â”€ Brute Force Protection â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const loginAttempts = new Map();
 const LOGIN_MAX = 5;
 const LOGIN_WINDOW = 15 * 60 * 1000;
 
-// ── Helpers ─────────────────────────────────────────────────────────────────
+const PASSWORD_RESET_CODE_TTL_MINUTES = Math.max(
+  1,
+  Number.parseInt(process.env.PASSWORD_RESET_CODE_TTL_MINUTES || '15', 10) || 15,
+);
+const PASSWORD_RESET_CODE_TTL_MS = PASSWORD_RESET_CODE_TTL_MINUTES * 60 * 1000;
+const PASSWORD_RESET_MIN_PASSWORD_LENGTH = Math.max(
+  6,
+  Number.parseInt(process.env.PASSWORD_RESET_MIN_PASSWORD_LENGTH || '8', 10) || 8,
+);
+const PASSWORD_RESET_RATE_WINDOW_MS = Math.max(
+  60 * 1000,
+  Number.parseInt(process.env.PASSWORD_RESET_RATE_WINDOW_MS || `${15 * 60 * 1000}`, 10)
+    || (15 * 60 * 1000),
+);
+const PASSWORD_RESET_MAX_PER_IP = Math.max(
+  1,
+  Number.parseInt(process.env.PASSWORD_RESET_MAX_PER_IP || '20', 10) || 20,
+);
+const PASSWORD_RESET_MAX_PER_EMAIL = Math.max(
+  1,
+  Number.parseInt(process.env.PASSWORD_RESET_MAX_PER_EMAIL || '5', 10) || 5,
+);
+const PASSWORD_RESET_VERIFY_MAX_PER_IP = Math.max(
+  1,
+  Number.parseInt(process.env.PASSWORD_RESET_VERIFY_MAX_PER_IP || '25', 10) || 25,
+);
+const PASSWORD_RESET_VERIFY_MAX_PER_TOKEN = Math.max(
+  1,
+  Number.parseInt(process.env.PASSWORD_RESET_VERIFY_MAX_PER_TOKEN || '10', 10) || 10,
+);
+
+const passwordResetRequestBucketsByIp = new Map();
+const passwordResetRequestBucketsByEmail = new Map();
+const passwordResetVerifyBucketsByIp = new Map();
+const passwordResetVerifyBucketsByToken = new Map();
+
+let passwordResetMailerInitialized = false;
+let passwordResetMailer = null;
+let hasAuthAuditLogsTable = true;
+
+// â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 function sanitize(obj) {
   if (!obj || typeof obj !== 'object') return obj;
   const r = {};
   for (const [k, v] of Object.entries(obj))
     r[k] = typeof v === 'string' ? v.replace(/[<>]/g, '') : v;
   return r;
+}
+
+function normalizeEmail(email) {
+  if (typeof email !== 'string') return '';
+  return email.trim().toLowerCase();
+}
+
+function getRequestIp(req) {
+  const forwarded = req?.headers?.['x-forwarded-for'];
+  const raw = Array.isArray(forwarded) ? forwarded[0] : forwarded;
+  const ip = String(raw || req?.ip || req?.socket?.remoteAddress || '')
+    .split(',')[0]
+    .trim();
+  return ip || 'unknown';
+}
+
+function consumeRateLimitBucket(store, key, { windowMs, max }) {
+  if (!key) return { allowed: true, count: 0, retryAfterMs: 0 };
+
+  const now = Date.now();
+  let bucket = store.get(key);
+  if (!bucket || (now - bucket.start) >= windowMs) {
+    bucket = { start: now, count: 0 };
+  }
+
+  bucket.count += 1;
+  store.set(key, bucket);
+
+  return {
+    allowed: bucket.count <= max,
+    count: bucket.count,
+    retryAfterMs: Math.max(0, windowMs - (now - bucket.start)),
+  };
+}
+
+function isMissingTable(error, tableName) {
+  const msg = String(error?.message || '').toLowerCase();
+  if (!msg) return false;
+
+  const table = String(tableName || '').toLowerCase();
+  if (table && !msg.includes(table)) return false;
+
+  return (
+    msg.includes('does not exist') ||
+    msg.includes('could not find') ||
+    msg.includes('relation')
+  );
+}
+
+function maybeString(value, maxLength = 1000) {
+  if (value === null || value === undefined) return null;
+  const text = String(value).trim();
+  if (!text) return null;
+  return text.length > maxLength ? text.slice(0, maxLength) : text;
+}
+
+function getPasswordResetMailer() {
+  if (passwordResetMailerInitialized) return passwordResetMailer;
+  passwordResetMailerInitialized = true;
+
+  const host = String(process.env.SMTP_HOST || '').trim();
+  const port = Number.parseInt(process.env.SMTP_PORT || '587', 10);
+  const user = String(process.env.SMTP_USER || '').trim();
+  const pass = String(process.env.SMTP_PASS || '').trim();
+
+  if (!host || !Number.isFinite(port) || port <= 0 || !user || !pass) {
+    passwordResetMailer = null;
+    return null;
+  }
+
+  const secureRaw = String(process.env.SMTP_SECURE || '').trim().toLowerCase();
+  const secure = secureRaw ? secureRaw === 'true' : port === 465;
+
+  passwordResetMailer = nodemailer.createTransport({
+    host,
+    port,
+    secure,
+    auth: { user, pass },
+  });
+
+  return passwordResetMailer;
+}
+
+function isPasswordResetEmailConfigured() {
+  const fromAddress = String(process.env.SMTP_FROM || process.env.SMTP_USER || '').trim();
+  return !!getPasswordResetMailer() && !!fromAddress;
+}
+
+function buildPasswordResetUrl({ email, token, code }) {
+  const baseUrl = String(process.env.PASSWORD_RESET_URL || '').trim();
+  if (!baseUrl) return '';
+  const separator = baseUrl.includes('?') ? '&' : '?';
+  return `${baseUrl}${separator}token=${encodeURIComponent(token)}&code=${encodeURIComponent(code)}&email=${encodeURIComponent(email)}`;
+}
+
+async function sendPasswordResetEmail({ email, name, token, code }) {
+  const transporter = getPasswordResetMailer();
+  const fromAddress = String(process.env.SMTP_FROM || process.env.SMTP_USER || '').trim();
+  if (!transporter || !fromAddress) {
+    return { ok: false, code: 'smtp_not_configured', message: 'SMTP is not configured.' };
+  }
+
+  const fromName = String(process.env.SMTP_FROM_NAME || 'SporPartner').trim();
+  const from = fromName ? `${fromName} <${fromAddress}>` : fromAddress;
+  const resetUrl = buildPasswordResetUrl({ email, token, code });
+  const greetingName = maybeString(name, 80) || 'Merhaba';
+
+  const textLines = [
+    `${greetingName},`,
+    '',
+    'SporPartner hesabin icin sifre sifirlama talebi aldik.',
+    `Dogrulama kodun: ${code}`,
+    `Kod gecerlilik suresi: ${PASSWORD_RESET_CODE_TTL_MINUTES} dakika.`,
+  ];
+  if (resetUrl) {
+    textLines.push('', `Sifirlama baglantisi: ${resetUrl}`);
+  }
+  textLines.push('', 'Bu talebi sen yapmadiysan bu e-postayi yok sayabilirsin.');
+
+  const htmlParts = [
+    `<p>${greetingName},</p>`,
+    '<p>SporPartner hesabin icin sifre sifirlama talebi aldik.</p>',
+    `<p><strong>Dogrulama kodun: ${code}</strong></p>`,
+    `<p>Kod gecerlilik suresi: ${PASSWORD_RESET_CODE_TTL_MINUTES} dakika.</p>`,
+  ];
+  if (resetUrl) {
+    htmlParts.push(`<p><a href="${resetUrl}">Sifreyi sifirlamak icin tikla</a></p>`);
+  }
+  htmlParts.push('<p>Bu talebi sen yapmadiysan bu e-postayi yok sayabilirsin.</p>');
+
+  try {
+    await transporter.sendMail({
+      from,
+      to: email,
+      subject: 'SporPartner sifre sifirlama kodu',
+      text: textLines.join('\n'),
+      html: htmlParts.join(''),
+    });
+    return { ok: true, code: 'sent', message: null };
+  } catch (error) {
+    return {
+      ok: false,
+      code: 'smtp_send_failed',
+      message: error?.message || String(error),
+    };
+  }
+}
+
+async function writeAuthAuditLog(req, {
+  eventType,
+  userId = null,
+  email = null,
+  success = true,
+  reason = '',
+  metadata = {},
+} = {}) {
+  if (!eventType || !hasAuthAuditLogsTable) return;
+
+  const client = db.raw();
+  if (!client) return;
+
+  const payload = {
+    id: `audit_${uuid()}`,
+    event_type: eventType,
+    user_id: userId || null,
+    email: normalizeEmail(email) || null,
+    ip_address: maybeString(getRequestIp(req), 64),
+    user_agent: maybeString(req?.headers?.['user-agent'], 512),
+    success: success !== false,
+    reason: maybeString(reason, 255),
+    metadata: metadata && typeof metadata === 'object' ? metadata : {},
+    created_at: new Date().toISOString(),
+  };
+
+  try {
+    const { error } = await client.from('auth_audit_logs').insert(payload);
+    if (!error) return;
+
+    if (isMissingTable(error, 'auth_audit_logs')) {
+      hasAuthAuditLogsTable = false;
+      return;
+    }
+
+    throw error;
+  } catch (error) {
+    console.warn('auth audit log write warning:', error?.message || error);
+  }
 }
 
 const SOCIAL_PLATFORMS = [
@@ -152,16 +439,16 @@ function buildBotPublicPersona({ botName, citySeed, countryCode, botIndex = 0, b
 }
 
 const REQUIRED_LISTING_SPORTS = [
-  { id: 'okey', name: 'Okey', icon: '�', category: 'Masa Sporları' },
-  { id: 'tavla', name: 'Tavla', icon: '🎲', category: 'Masa Sporları' },
-  { id: 'satranc', name: 'Satranç', icon: '♟️', category: 'Masa Sporları' },
-  { id: 'karting', name: 'Karting', icon: '🏎️', category: 'Motor Sporları' },
+  { id: 'okey', name: 'Okey', icon: 'ï¿½', category: 'Masa SporlarÄ±' },
+  { id: 'tavla', name: 'Tavla', icon: 'ğŸ²', category: 'Masa SporlarÄ±' },
+  { id: 'satranc', name: 'SatranÃ§', icon: 'â™Ÿï¸', category: 'Masa SporlarÄ±' },
+  { id: 'karting', name: 'Karting', icon: 'ğŸï¸', category: 'Motor SporlarÄ±' },
 ];
 
 const SPORT_ICON_UPDATES = [
-  { id: 'hiking', icon: '🚶' },
-  { id: 'skateboarding', icon: '🏂' },
-  { id: 'okey', icon: '�' },
+  { id: 'hiking', icon: 'ğŸš¶' },
+  { id: 'skateboarding', icon: 'ğŸ‚' },
+  { id: 'okey', icon: '🃏' },
 ];
 
 let sportIconsEnsured = false;
@@ -212,7 +499,7 @@ async function ensureRequiredListingSports() {
       }))
     );
 
-    // Unique conflict olursa başka bir request aynı anda eklemiş olabilir.
+    // Unique conflict olursa baÅŸka bir request aynÄ± anda eklemiÅŸ olabilir.
     if (insertError && insertError.code !== '23505') throw insertError;
 
     requiredListingSportsEnsured = true;
@@ -410,7 +697,7 @@ async function canViewerSee(viewerId, ownerId, visibility) {
   if (viewerId && ownerId && viewerId === ownerId) return true;
   if (rule === 'NOBODY') return false;
   if (rule === 'EVERYONE') return true;
-  // FOLLOWERS — check if viewer follows owner
+  // FOLLOWERS â€” check if viewer follows owner
   const f = await db.findOne('follows', { follower_id: viewerId, following_id: ownerId });
   return f?.status === 'accepted';
 }
@@ -473,8 +760,587 @@ async function pushNotification(n) {
     sender_avatar: n.senderAvatar || null,
     is_read: false,
   };
-  await db.insert('notifications', notif).catch(e => console.error('notif insert err:', e.message));
+
+  let inserted = true;
+  try {
+    await db.insert('notifications', notif);
+  } catch (e) {
+    inserted = false;
+    console.error('notif insert err:', e.message);
+  }
+
+  if (inserted) {
+    try {
+      await sendPushForNotification(notif);
+    } catch (e) {
+      console.error('push send err:', e?.message || e);
+    }
+  }
+
   return toCamel(notif);
+}
+
+const PUSH_PLATFORM_ALLOWLIST = new Set(['android', 'ios', 'web']);
+const FCM_LEGACY_ENDPOINT = 'https://fcm.googleapis.com/fcm/send';
+const FCM_OAUTH_TOKEN_ENDPOINT = 'https://oauth2.googleapis.com/token';
+const FCM_OAUTH_SCOPE = 'https://www.googleapis.com/auth/firebase.messaging';
+const PUSH_FCM_TIMEOUT_MS = Number.parseInt(process.env.PUSH_FCM_TIMEOUT_MS || '8000', 10);
+const PUSH_FCM_TOKEN_REFRESH_SKEW_MS = 60 * 1000;
+const INVALID_PUSH_TOKEN_ERRORS = new Set([
+  'NotRegistered',
+  'InvalidRegistration',
+  'MismatchSenderId',
+  'registration-token-not-registered',
+  'UNREGISTERED',
+]);
+
+let firebaseServiceAccountCache;
+let firebaseAccessTokenCache = {
+  token: '',
+  expiresAt: 0,
+};
+
+function normalizePushToken(token) {
+  if (typeof token !== 'string') return '';
+  return token.trim();
+}
+
+function normalizePushPlatform(platform) {
+  const normalized = typeof platform === 'string' ? platform.trim().toLowerCase() : 'android';
+  if (!normalized) return 'android';
+  return PUSH_PLATFORM_ALLOWLIST.has(normalized) ? normalized : 'android';
+}
+
+function isMissingPushTokensTable(error) {
+  return isMissingTable(error, 'push_tokens');
+}
+
+async function upsertPushToken({ userId, token, platform }) {
+  const client = db.raw();
+  if (!client) return { stored: false, reason: 'db_unavailable' };
+
+  const cleanToken = normalizePushToken(token);
+  if (!cleanToken) return { stored: false, reason: 'invalid_token' };
+
+  const now = new Date().toISOString();
+  const payload = {
+    user_id: userId,
+    token: cleanToken,
+    platform: normalizePushPlatform(platform),
+    is_active: true,
+    updated_at: now,
+    last_seen_at: now,
+  };
+
+  const { error } = await client.from('push_tokens').upsert(payload, {
+    onConflict: 'user_id,token',
+    ignoreDuplicates: false,
+  });
+
+  if (error) {
+    if (isMissingPushTokensTable(error)) {
+      return { stored: false, reason: 'missing_table' };
+    }
+    throw error;
+  }
+
+  return { stored: true, reason: 'ok' };
+}
+
+async function deactivatePushToken({ userId, token = null }) {
+  const client = db.raw();
+  if (!client) return { stored: false, reason: 'db_unavailable' };
+
+  const now = new Date().toISOString();
+  let query = client
+    .from('push_tokens')
+    .update({ is_active: false, updated_at: now })
+    .eq('user_id', userId)
+    .eq('is_active', true);
+
+  const cleanToken = normalizePushToken(token);
+  if (cleanToken) query = query.eq('token', cleanToken);
+
+  const { error } = await query;
+  if (error) {
+    if (isMissingPushTokensTable(error)) {
+      return { stored: false, reason: 'missing_table' };
+    }
+    throw error;
+  }
+
+  return { stored: true, reason: 'ok' };
+}
+
+function getFcmServerKey() {
+  return String(process.env.FCM_SERVER_KEY || process.env.FIREBASE_SERVER_KEY || '').trim();
+}
+
+function decodeBase64Utf8(value) {
+  if (!value) return '';
+  try {
+    return Buffer.from(String(value), 'base64').toString('utf8');
+  } catch {
+    return '';
+  }
+}
+
+function parseFirebaseServiceAccount(value) {
+  if (!value) return null;
+
+  try {
+    const parsed = JSON.parse(value);
+    if (parsed && typeof parsed === 'object') return parsed;
+  } catch {
+    // fall through and try base64-decoding
+  }
+
+  const decoded = decodeBase64Utf8(value);
+  if (!decoded) return null;
+
+  try {
+    const parsed = JSON.parse(decoded);
+    if (parsed && typeof parsed === 'object') return parsed;
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
+function getFirebaseServiceAccount() {
+  if (firebaseServiceAccountCache !== undefined) return firebaseServiceAccountCache;
+
+  const rawJson = String(process.env.FIREBASE_SERVICE_ACCOUNT_JSON || process.env.FIREBASE_SERVICE_ACCOUNT || '').trim();
+  const rawBase64 = String(process.env.FIREBASE_SERVICE_ACCOUNT_BASE64 || '').trim();
+
+  const parsed = parseFirebaseServiceAccount(rawJson) || parseFirebaseServiceAccount(rawBase64);
+  if (!parsed) {
+    firebaseServiceAccountCache = null;
+    return firebaseServiceAccountCache;
+  }
+
+  const clientEmail = String(parsed.client_email || '').trim();
+  const privateKeyRaw = String(parsed.private_key || '').trim();
+  const privateKey = privateKeyRaw.replace(/\\n/g, '\n');
+  const projectId = String(process.env.FIREBASE_PROJECT_ID || parsed.project_id || '').trim();
+
+  if (!clientEmail || !privateKey || !projectId) {
+    firebaseServiceAccountCache = null;
+    return firebaseServiceAccountCache;
+  }
+
+  firebaseServiceAccountCache = { clientEmail, privateKey, projectId };
+  return firebaseServiceAccountCache;
+}
+
+function toBase64Url(value) {
+  return Buffer.from(value)
+    .toString('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/g, '');
+}
+
+function createGoogleJwtAssertion(serviceAccount) {
+  const now = Math.floor(Date.now() / 1000);
+  const header = { alg: 'RS256', typ: 'JWT' };
+  const payload = {
+    iss: serviceAccount.clientEmail,
+    scope: FCM_OAUTH_SCOPE,
+    aud: FCM_OAUTH_TOKEN_ENDPOINT,
+    iat: now,
+    exp: now + 3600,
+  };
+
+  const encodedHeader = toBase64Url(JSON.stringify(header));
+  const encodedPayload = toBase64Url(JSON.stringify(payload));
+  const unsignedToken = `${encodedHeader}.${encodedPayload}`;
+
+  const signature = crypto
+    .createSign('RSA-SHA256')
+    .update(unsignedToken)
+    .end()
+    .sign(serviceAccount.privateKey);
+
+  return `${unsignedToken}.${toBase64Url(signature)}`;
+}
+
+async function getFirebaseAccessToken(serviceAccount) {
+  const now = Date.now();
+  if (
+    firebaseAccessTokenCache.token &&
+    firebaseAccessTokenCache.expiresAt - PUSH_FCM_TOKEN_REFRESH_SKEW_MS > now
+  ) {
+    return { ok: true, token: firebaseAccessTokenCache.token };
+  }
+
+  if (typeof fetch !== 'function') {
+    return { ok: false, code: 'fetch_unavailable', message: 'Global fetch is not available.' };
+  }
+
+  let assertion;
+  try {
+    assertion = createGoogleJwtAssertion(serviceAccount);
+  } catch (error) {
+    return { ok: false, code: 'credential_error', message: error?.message || String(error) };
+  }
+
+  const controller = new AbortController();
+  const timeoutHandle = setTimeout(() => controller.abort(), PUSH_FCM_TIMEOUT_MS);
+
+  try {
+    const body = new URLSearchParams({
+      grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+      assertion,
+    });
+
+    const response = await fetch(FCM_OAUTH_TOKEN_ENDPOINT, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: body.toString(),
+      signal: controller.signal,
+    });
+
+    const responseText = await response.text();
+    let parsed = null;
+    try {
+      parsed = responseText ? JSON.parse(responseText) : null;
+    } catch {
+      parsed = null;
+    }
+
+    if (!response.ok) {
+      return {
+        ok: false,
+        code: `auth_http_${response.status}`,
+        message: parsed?.error_description || parsed?.error || responseText || response.statusText,
+      };
+    }
+
+    const token = String(parsed?.access_token || '').trim();
+    const expiresIn = Number(parsed?.expires_in || 0);
+    if (!token || !Number.isFinite(expiresIn) || expiresIn <= 0) {
+      return {
+        ok: false,
+        code: 'auth_invalid_response',
+        message: 'OAuth token response did not include a valid access token.',
+      };
+    }
+
+    firebaseAccessTokenCache = {
+      token,
+      expiresAt: now + (expiresIn * 1000),
+    };
+
+    return { ok: true, token };
+  } catch (error) {
+    if (error?.name === 'AbortError') {
+      return { ok: false, code: 'auth_timeout', message: 'Firebase auth request timed out.' };
+    }
+    return { ok: false, code: 'auth_request_error', message: error?.message || String(error) };
+  } finally {
+    clearTimeout(timeoutHandle);
+  }
+}
+
+function resolvePushProvider() {
+  const serviceAccount = getFirebaseServiceAccount();
+  if (serviceAccount) return { mode: 'fcm_v1', serviceAccount };
+
+  const serverKey = getFcmServerKey();
+  if (serverKey) return { mode: 'fcm_legacy', serverKey };
+
+  return null;
+}
+
+function toPushDataValue(value) {
+  if (value === null || value === undefined) return '';
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function buildPushDataPayload(notif) {
+  const notifType = toPushDataValue(notif.type);
+  const notifId = toPushDataValue(notif.id);
+  return {
+    // Event envelope type consumed by Flutter realtime bridge.
+    type: 'new_notification',
+    id: notifId,
+    notificationId: notifId,
+    notifType,
+    notificationType: notifType,
+    relatedId: toPushDataValue(notif.related_id),
+    link: toPushDataValue(notif.link),
+    senderId: toPushDataValue(notif.sender_id),
+    title: toPushDataValue(notif.title),
+    body: toPushDataValue(notif.body),
+    message: toPushDataValue(notif.body),
+  };
+}
+
+async function listActivePushTokens(userId, limit = 10) {
+  const client = db.raw();
+  if (!client) return { tokens: [], reason: 'db_unavailable' };
+
+  const { data, error } = await client
+    .from('push_tokens')
+    .select('token,platform')
+    .eq('user_id', userId)
+    .eq('is_active', true)
+    .order('last_seen_at', { ascending: false })
+    .limit(limit);
+
+  if (error) {
+    if (isMissingPushTokensTable(error)) {
+      return { tokens: [], reason: 'missing_table' };
+    }
+    throw error;
+  }
+
+  return { tokens: data || [], reason: 'ok' };
+}
+
+async function sendFcmLegacyMessage({ token, title, body, data }) {
+  if (typeof fetch !== 'function') {
+    return { ok: false, code: 'fetch_unavailable', message: 'Global fetch is not available.' };
+  }
+
+  const serverKey = getFcmServerKey();
+  if (!serverKey) {
+    return { ok: false, code: 'provider_not_configured', message: 'FCM_SERVER_KEY is not set.' };
+  }
+
+  const controller = new AbortController();
+  const timeoutHandle = setTimeout(() => controller.abort(), PUSH_FCM_TIMEOUT_MS);
+
+  try {
+    const payload = {
+      to: token,
+      priority: 'high',
+      notification: {
+        title: title || 'SporPartner',
+        body: body || '',
+      },
+      data: data || {},
+      content_available: true,
+      mutable_content: true,
+    };
+
+    const response = await fetch(FCM_LEGACY_ENDPOINT, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `key=${serverKey}`,
+      },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+
+    const responseText = await response.text();
+    let parsed = null;
+    try {
+      parsed = responseText ? JSON.parse(responseText) : null;
+    } catch {
+      parsed = null;
+    }
+
+    if (!response.ok) {
+      return {
+        ok: false,
+        code: `http_${response.status}`,
+        message: responseText || response.statusText,
+      };
+    }
+
+    const result = parsed?.results?.[0] || null;
+    if (result?.message_id) {
+      return { ok: true, code: 'sent', message: null };
+    }
+
+    if (result?.error) {
+      return { ok: false, code: result.error, message: result.error };
+    }
+
+    if (parsed?.success > 0) {
+      return { ok: true, code: 'sent', message: null };
+    }
+
+    return { ok: false, code: 'unknown_failure', message: responseText || 'Unknown FCM failure.' };
+  } catch (error) {
+    if (error?.name === 'AbortError') {
+      return { ok: false, code: 'timeout', message: 'FCM request timed out.' };
+    }
+    return { ok: false, code: 'request_error', message: error?.message || String(error) };
+  } finally {
+    clearTimeout(timeoutHandle);
+  }
+}
+
+async function sendFcmV1Message({ token, title, body, data, serviceAccount }) {
+  if (typeof fetch !== 'function') {
+    return { ok: false, code: 'fetch_unavailable', message: 'Global fetch is not available.' };
+  }
+
+  const account = serviceAccount || getFirebaseServiceAccount();
+  if (!account) {
+    return {
+      ok: false,
+      code: 'provider_not_configured',
+      message: 'Firebase service account env is not set.',
+    };
+  }
+
+  const auth = await getFirebaseAccessToken(account);
+  if (!auth.ok) return auth;
+
+  const controller = new AbortController();
+  const timeoutHandle = setTimeout(() => controller.abort(), PUSH_FCM_TIMEOUT_MS);
+
+  try {
+    const endpoint = `https://fcm.googleapis.com/v1/projects/${encodeURIComponent(account.projectId)}/messages:send`;
+    const payload = {
+      message: {
+        token,
+        notification: {
+          title: title || 'SporPartner',
+          body: body || '',
+        },
+        data: data || {},
+      },
+    };
+
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${auth.token}`,
+      },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+
+    const responseText = await response.text();
+    let parsed = null;
+    try {
+      parsed = responseText ? JSON.parse(responseText) : null;
+    } catch {
+      parsed = null;
+    }
+
+    if (response.ok) {
+      return { ok: true, code: 'sent', message: null };
+    }
+
+    const status = String(parsed?.error?.status || '').trim();
+    const details = Array.isArray(parsed?.error?.details) ? parsed.error.details : [];
+    const fcmDetail = details.find((item) => item && typeof item.errorCode === 'string');
+    const fcmErrorCode = String(fcmDetail?.errorCode || '').trim();
+    const message = parsed?.error?.message || responseText || response.statusText;
+
+    if (fcmErrorCode) {
+      return { ok: false, code: fcmErrorCode, message };
+    }
+
+    if (status) {
+      return { ok: false, code: status, message };
+    }
+
+    return {
+      ok: false,
+      code: `http_${response.status}`,
+      message,
+    };
+  } catch (error) {
+    if (error?.name === 'AbortError') {
+      return { ok: false, code: 'timeout', message: 'FCM request timed out.' };
+    }
+    return { ok: false, code: 'request_error', message: error?.message || String(error) };
+  } finally {
+    clearTimeout(timeoutHandle);
+  }
+}
+
+async function deactivateInvalidPushToken({ userId, token }) {
+  const cleanToken = normalizePushToken(token);
+  if (!cleanToken) return;
+  await deactivatePushToken({ userId, token: cleanToken });
+}
+
+async function sendPushForNotification(notif) {
+  const provider = resolvePushProvider();
+  if (!provider) return { sent: 0, attempted: 0, reason: 'provider_not_configured' };
+
+  const tokenResult = await listActivePushTokens(notif.user_id, 10);
+  if (!tokenResult.tokens.length) {
+    return { sent: 0, attempted: 0, reason: tokenResult.reason || 'no_tokens' };
+  }
+
+  const pushData = buildPushDataPayload(notif);
+  let sentCount = 0;
+  let attemptedCount = 0;
+
+  for (const row of tokenResult.tokens) {
+    const token = normalizePushToken(row.token);
+    if (!token) continue;
+
+    attemptedCount += 1;
+    const result = provider.mode === 'fcm_v1'
+      ? await sendFcmV1Message({
+        token,
+        title: notif.title,
+        body: notif.body,
+        data: pushData,
+        serviceAccount: provider.serviceAccount,
+      })
+      : await sendFcmLegacyMessage({
+        token,
+        title: notif.title,
+        body: notif.body,
+        data: pushData,
+      });
+
+    if (result.ok) {
+      sentCount += 1;
+      continue;
+    }
+
+    if (INVALID_PUSH_TOKEN_ERRORS.has(result.code)) {
+      await deactivateInvalidPushToken({ userId: notif.user_id, token });
+      continue;
+    }
+
+    const msg = String(result.message || '').toLowerCase();
+    if (
+      msg.includes('notregistered') ||
+      msg.includes('invalidregistration') ||
+      msg.includes('unregistered') ||
+      (msg.includes('registration token') && msg.includes('not valid'))
+    ) {
+      await deactivateInvalidPushToken({ userId: notif.user_id, token });
+      continue;
+    }
+
+    console.warn('push delivery warning:', {
+      userId: notif.user_id,
+      code: result.code,
+      message: result.message,
+      platform: row.platform,
+    });
+  }
+
+  return {
+    sent: sentCount,
+    attempted: attemptedCount,
+    reason: sentCount > 0 ? 'sent' : 'failed',
+  };
 }
 
 async function userById(id) { return id ? await db.findById('users', id) : null; }
@@ -544,8 +1410,8 @@ async function generateMatchReminders({ now = new Date().toISOString(), limit = 
       await pushNotification({
         userId: recipient.userId,
         type: 'MATCH_REMINDER',
-        title: 'Maç oynandı mı?',
-        body: `${recipient.sender?.name || 'Rakibin'} ile planlanan maç zamanı geçti. Oynandıysa maçı onaylayın.`,
+        title: 'MaÃ§ oynandÄ± mÄ±?',
+        body: `${recipient.sender?.name || 'Rakibin'} ile planlanan maÃ§ zamanÄ± geÃ§ti. OynandÄ±ysa maÃ§Ä± onaylayÄ±n.`,
         relatedId: match.id,
         senderId: recipient.sender?.id,
         senderName: recipient.sender?.name,
@@ -829,9 +1695,9 @@ async function enrichPostReactions(postId, currentUserId) {
   return { userReaction, reactionCounts, likeCount: reactions.length, isLiked: !!userReaction };
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 //  HEALTH
-// ══════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 app.get('/health', (_req, res) => res.json({
   status: 'ok', env: 'vercel', database: 'supabase', timestamp: new Date().toISOString()
 }));
@@ -839,9 +1705,9 @@ app.get('/', (_req, res) => res.json({
   name: 'Sports Partner API', version: '2.0.0', status: 'running', database: 'supabase'
 }));
 
-// ══════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 //  GEO (public)
-// ══════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 app.get('/api/geo/cities', async (_req, res) => {
   try {
     const data = await db.query('cities');
@@ -884,15 +1750,15 @@ app.get('/api/cities', async (req, res) => {
   } catch (e) { res.status(500).json({ message: e.message }); }
 });
 
-// ══════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 //  AUTH
-// ══════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 const authRouter = express.Router();
 
 authRouter.post('/login', async (req, res) => {
   try {
     const { email, password } = req.body;
-    if (!email || !password) return res.status(400).json({ message: 'Email ve şifre gerekli.' });
+    if (!email || !password) return res.status(400).json({ message: 'Email ve ÅŸifre gerekli.' });
 
     // Brute force protection
     const ip = req.headers['x-forwarded-for'] || req.ip;
@@ -903,14 +1769,14 @@ authRouter.post('/login', async (req, res) => {
       loginAttempts.set(ip, att);
     }
     if (att.count >= LOGIN_MAX) {
-      return res.status(429).json({ message: 'Çok fazla başarısız giriş. 15 dk bekleyin.' });
+      return res.status(429).json({ message: 'Ã‡ok fazla baÅŸarÄ±sÄ±z giriÅŸ. 15 dk bekleyin.' });
     }
 
     const user = await db.findOne('users', { email: email.toLowerCase() });
-    if (!user) { att.count++; return res.status(401).json({ message: 'Kullanıcı bulunamadı.' }); }
+    if (!user) { att.count++; return res.status(401).json({ message: 'KullanÄ±cÄ± bulunamadÄ±.' }); }
 
     const ok = await bcrypt.compare(password, user.password);
-    if (!ok) { att.count++; return res.status(401).json({ message: 'Hatalı şifre.' }); }
+    if (!ok) { att.count++; return res.status(401).json({ message: 'HatalÄ± ÅŸifre.' }); }
 
     loginAttempts.delete(ip);
     const tokens = generateTokens(user.id);
@@ -920,17 +1786,17 @@ authRouter.post('/login', async (req, res) => {
     }).catch(() => {});
 
     res.json({ ...tokens, user: safeUser(user) });
-  } catch (e) { console.error('login error:', e); res.status(500).json({ message: 'Sunucu hatası.' }); }
+  } catch (e) { console.error('login error:', e); res.status(500).json({ message: 'Sunucu hatasÄ±.' }); }
 });
 
 authRouter.post('/register', contentFilter('name'), async (req, res) => {
   try {
     const { name, email, password } = req.body;
-    if (!name || !email || !password) return res.status(400).json({ message: 'Ad, email ve şifre gerekli.' });
-    if (password.length < 6) return res.status(400).json({ message: 'Şifre en az 6 karakter olmalı.' });
+    if (!name || !email || !password) return res.status(400).json({ message: 'Ad, email ve ÅŸifre gerekli.' });
+    if (password.length < 6) return res.status(400).json({ message: 'Åifre en az 6 karakter olmalÄ±.' });
 
     const existing = await db.findOne('users', { email: email.toLowerCase() });
-    if (existing) return res.status(409).json({ message: 'Bu email zaten kayıtlı.' });
+    if (existing) return res.status(409).json({ message: 'Bu email zaten kayÄ±tlÄ±.' });
 
     const hashed = await bcrypt.hash(password, 10);
     const userId = 'user_' + uuid();
@@ -959,16 +1825,16 @@ authRouter.post('/register', contentFilter('name'), async (req, res) => {
     }).catch(() => {});
 
     res.status(201).json({ ...tokens, user: safeUser(inserted) });
-  } catch (e) { console.error('register error:', e); res.status(500).json({ message: 'Sunucu hatası.' }); }
+  } catch (e) { console.error('register error:', e); res.status(500).json({ message: 'Sunucu hatasÄ±.' }); }
 });
 
 authRouter.post('/token/refresh', async (req, res) => {
   try {
     const { refreshToken } = req.body;
-    if (!refreshToken) return res.status(401).json({ message: 'Geçersiz refresh token.' });
+    if (!refreshToken) return res.status(401).json({ message: 'GeÃ§ersiz refresh token.' });
 
     const stored = await db.findOne('refresh_tokens', { token: refreshToken });
-    if (!stored) return res.status(401).json({ message: 'Geçersiz refresh token.' });
+    if (!stored) return res.status(401).json({ message: 'GeÃ§ersiz refresh token.' });
 
     const payload = verifyRefreshToken(refreshToken);
     await db.removeWhere('refresh_tokens', { token: refreshToken }).catch(() => {});
@@ -980,62 +1846,266 @@ authRouter.post('/token/refresh', async (req, res) => {
     }).catch(() => {});
 
     res.json(tokens);
-  } catch { res.status(401).json({ message: 'Refresh token süresi dolmuş.' }); }
+  } catch { res.status(401).json({ message: 'Refresh token sÃ¼resi dolmuÅŸ.' }); }
 });
 
 authRouter.post('/logout', authMiddleware, async (req, res) => {
   const { refreshToken } = req.body;
   if (refreshToken) await db.removeWhere('refresh_tokens', { token: refreshToken }).catch(() => {});
-  res.json({ message: 'Çıkış yapıldı.' });
+  res.json({ message: 'Ã‡Ä±kÄ±ÅŸ yapÄ±ldÄ±.' });
 });
 
-// Password reset tokens stored in Supabase DB (NOT in-memory — serverless safe)
+// Password reset tokens stored in Supabase DB (NOT in-memory â€” serverless safe)
 // Table: password_reset_tokens (id, user_id, code, token, expires_at, created_at)
 
 authRouter.post('/forgot-password', async (req, res) => {
-  const { email } = req.body || {};
-  const user = email ? await db.findOne('users', { email }) : null;
-  if (!user) return res.json({ message: 'Eğer hesap mevcutsa sıfırlama kodu gönderildi.' });
-  const code = String(Math.floor(100000 + Math.random() * 900000));
-  const token = uuid();
-  // Clean up old tokens for this user
-  await db.removeWhere('password_reset_tokens', { user_id: user.id }).catch(() => {});
-  await db.insert('password_reset_tokens', {
-    id: uuid(), user_id: user.id, code, token,
-    expires_at: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
-  }).catch(() => {});
-  // TODO: Send email with code via SendGrid/Resend when configured
-  // For now, code is stored in DB but not sent — admin can look up in DB
-  res.json({ message: 'Sıfırlama kodu gönderildi.' });
+  const email = normalizeEmail(req.body?.email);
+
+  try {
+    const ip = getRequestIp(req);
+
+    const ipRate = consumeRateLimitBucket(passwordResetRequestBucketsByIp, `forgot:${ip}`, {
+      windowMs: PASSWORD_RESET_RATE_WINDOW_MS,
+      max: PASSWORD_RESET_MAX_PER_IP,
+    });
+    if (!ipRate.allowed) {
+      await writeAuthAuditLog(req, {
+        eventType: 'AUTH_FORGOT_RATE_LIMITED',
+        email,
+        success: false,
+        reason: 'ip_limit',
+        metadata: { bucket: 'ip', count: ipRate.count },
+      });
+      return res.status(429).json({ message: 'Cok fazla sifre sifirlama istegi. Lutfen daha sonra tekrar deneyin.' });
+    }
+
+    if (email) {
+      const emailRate = consumeRateLimitBucket(passwordResetRequestBucketsByEmail, `forgot:${email}`, {
+        windowMs: PASSWORD_RESET_RATE_WINDOW_MS,
+        max: PASSWORD_RESET_MAX_PER_EMAIL,
+      });
+      if (!emailRate.allowed) {
+        await writeAuthAuditLog(req, {
+          eventType: 'AUTH_FORGOT_RATE_LIMITED',
+          email,
+          success: false,
+          reason: 'email_limit',
+          metadata: { bucket: 'email', count: emailRate.count },
+        });
+        return res.status(429).json({ message: 'Cok fazla sifre sifirlama istegi. Lutfen daha sonra tekrar deneyin.' });
+      }
+    }
+
+    if (!isPasswordResetEmailConfigured()) {
+      await writeAuthAuditLog(req, {
+        eventType: 'AUTH_FORGOT_CONFIG_ERROR',
+        email,
+        success: false,
+        reason: 'smtp_not_configured',
+      });
+      return res.status(503).json({ message: 'Sifre sifirlama servisi su anda kullanilamiyor.' });
+    }
+
+    if (!email) {
+      await writeAuthAuditLog(req, {
+        eventType: 'AUTH_FORGOT_INVALID_EMAIL',
+        success: false,
+        reason: 'missing_email',
+      });
+      return res.json({ message: 'Eger hesap mevcutsa sifirlama kodu gonderildi.' });
+    }
+
+    const user = await db.findOne('users', { email });
+    if (!user) {
+      await writeAuthAuditLog(req, {
+        eventType: 'AUTH_FORGOT_REQUESTED',
+        email,
+        success: true,
+        reason: 'user_not_found',
+      });
+      return res.json({ message: 'Eger hesap mevcutsa sifirlama kodu gonderildi.' });
+    }
+
+    const code = String(Math.floor(100000 + Math.random() * 900000));
+    const token = uuid();
+
+    await db.removeWhere('password_reset_tokens', { user_id: user.id }).catch(() => {});
+    await db.insert('password_reset_tokens', {
+      id: uuid(),
+      user_id: user.id,
+      code,
+      token,
+      expires_at: new Date(Date.now() + PASSWORD_RESET_CODE_TTL_MS).toISOString(),
+    });
+
+    const mailResult = await sendPasswordResetEmail({
+      email: user.email,
+      name: user.name,
+      token,
+      code,
+    });
+
+    if (!mailResult.ok) {
+      await writeAuthAuditLog(req, {
+        eventType: 'AUTH_FORGOT_MAIL_FAILED',
+        userId: user.id,
+        email: user.email,
+        success: false,
+        reason: mailResult.code,
+        metadata: { message: mailResult.message },
+      });
+      return res.status(503).json({ message: 'Sifre sifirlama e-postasi gonderilemedi. Lutfen daha sonra tekrar deneyin.' });
+    }
+
+    await writeAuthAuditLog(req, {
+      eventType: 'AUTH_FORGOT_EMAIL_SENT',
+      userId: user.id,
+      email: user.email,
+      success: true,
+      reason: 'ok',
+    });
+
+    return res.json({ message: 'Sifirlama kodu gonderildi.' });
+  } catch (e) {
+    console.error('forgot-password error:', e);
+    await writeAuthAuditLog(req, {
+      eventType: 'AUTH_FORGOT_ERROR',
+      email,
+      success: false,
+      reason: e?.message || 'server_error',
+    });
+    return res.status(500).json({ message: 'Sifre sifirlama islemi tamamlanamadi.' });
+  }
 });
 
 authRouter.post('/reset-password', async (req, res) => {
-  const { token, code, newPassword } = req.body || {};
-  const entry = token ? await db.findOne('password_reset_tokens', { token }) : null;
-  if (!entry) return res.status(400).json({ message: 'Geçersiz veya süresi dolmuş token.' });
-  if (entry.code !== code) return res.status(400).json({ message: 'Hatalı sıfırlama kodu.' });
-  if (new Date(entry.expires_at) < new Date()) {
-    await db.removeWhere('password_reset_tokens', { token }).catch(() => {});
-    return res.status(400).json({ message: 'Kodun süresi dolmuş.' });
+  const token = maybeString(req.body?.token, 128) || '';
+  const code = maybeString(req.body?.code, 32) || '';
+  const newPassword = String(req.body?.newPassword || '');
+
+  try {
+    const ip = getRequestIp(req);
+
+    const ipRate = consumeRateLimitBucket(passwordResetVerifyBucketsByIp, `reset:${ip}`, {
+      windowMs: PASSWORD_RESET_RATE_WINDOW_MS,
+      max: PASSWORD_RESET_VERIFY_MAX_PER_IP,
+    });
+    if (!ipRate.allowed) {
+      await writeAuthAuditLog(req, {
+        eventType: 'AUTH_RESET_RATE_LIMITED',
+        success: false,
+        reason: 'ip_limit',
+        metadata: { bucket: 'ip', count: ipRate.count },
+      });
+      return res.status(429).json({ message: 'Cok fazla sifre sifirlama denemesi. Lutfen daha sonra tekrar deneyin.' });
+    }
+
+    if (token) {
+      const tokenRate = consumeRateLimitBucket(passwordResetVerifyBucketsByToken, `reset:${token}`, {
+        windowMs: PASSWORD_RESET_RATE_WINDOW_MS,
+        max: PASSWORD_RESET_VERIFY_MAX_PER_TOKEN,
+      });
+      if (!tokenRate.allowed) {
+        await writeAuthAuditLog(req, {
+          eventType: 'AUTH_RESET_RATE_LIMITED',
+          success: false,
+          reason: 'token_limit',
+          metadata: { bucket: 'token', count: tokenRate.count },
+        });
+        return res.status(429).json({ message: 'Cok fazla sifre sifirlama denemesi. Lutfen daha sonra tekrar deneyin.' });
+      }
+    }
+
+    if (!token || !code || !newPassword) {
+      await writeAuthAuditLog(req, {
+        eventType: 'AUTH_RESET_INVALID_REQUEST',
+        success: false,
+        reason: 'missing_fields',
+        metadata: {
+          hasToken: !!token,
+          hasCode: !!code,
+          hasPassword: !!newPassword,
+        },
+      });
+      return res.status(400).json({ message: 'Gecersiz veya suresi dolmus token.' });
+    }
+
+    if (newPassword.length < PASSWORD_RESET_MIN_PASSWORD_LENGTH) {
+      await writeAuthAuditLog(req, {
+        eventType: 'AUTH_RESET_WEAK_PASSWORD',
+        success: false,
+        reason: 'password_too_short',
+      });
+      return res.status(400).json({ message: `Sifre en az ${PASSWORD_RESET_MIN_PASSWORD_LENGTH} karakter olmali.` });
+    }
+
+    const entry = await db.findOne('password_reset_tokens', { token });
+    if (!entry) {
+      await writeAuthAuditLog(req, {
+        eventType: 'AUTH_RESET_INVALID_TOKEN',
+        success: false,
+        reason: 'not_found',
+      });
+      return res.status(400).json({ message: 'Gecersiz veya suresi dolmus token.' });
+    }
+
+    if (new Date(entry.expires_at) < new Date()) {
+      await db.removeWhere('password_reset_tokens', { token }).catch(() => {});
+      await writeAuthAuditLog(req, {
+        eventType: 'AUTH_RESET_EXPIRED_TOKEN',
+        userId: entry.user_id,
+        success: false,
+        reason: 'expired',
+      });
+      return res.status(400).json({ message: 'Kodun suresi dolmus.' });
+    }
+
+    if (String(entry.code) !== code) {
+      await writeAuthAuditLog(req, {
+        eventType: 'AUTH_RESET_INVALID_CODE',
+        userId: entry.user_id,
+        success: false,
+        reason: 'mismatch',
+      });
+      return res.status(400).json({ message: 'Hatali sifirlama kodu.' });
+    }
+
+    const hashed = await bcrypt.hash(newPassword, 10);
+    await db.update('users', entry.user_id, { password: hashed });
+    await db.removeWhere('password_reset_tokens', { user_id: entry.user_id }).catch(() => {});
+    await db.removeWhere('refresh_tokens', { user_id: entry.user_id }).catch(() => {});
+
+    await writeAuthAuditLog(req, {
+      eventType: 'AUTH_RESET_SUCCESS',
+      userId: entry.user_id,
+      success: true,
+      reason: 'password_changed',
+    });
+
+    return res.json({ message: 'Sifre basariyla sifirlandi.' });
+  } catch (e) {
+    console.error('reset-password error:', e);
+    await writeAuthAuditLog(req, {
+      eventType: 'AUTH_RESET_ERROR',
+      success: false,
+      reason: e?.message || 'server_error',
+      metadata: { hasToken: !!token },
+    });
+    return res.status(500).json({ message: 'Sifre sifirlama islemi tamamlanamadi.' });
   }
-  if (!newPassword || newPassword.length < 6) return res.status(400).json({ message: 'Şifre en az 6 karakter olmalı.' });
-  const hashed = await bcrypt.hash(newPassword, 10);
-  await db.update('users', entry.user_id, { password: hashed });
-  await db.removeWhere('password_reset_tokens', { token }).catch(() => {});
-  res.json({ message: 'Şifre başarıyla sıfırlandı.' });
 });
 
-// Delete account — requires password confirmation
+// Delete account â€” requires password confirmation
 authRouter.delete('/delete-account', authMiddleware, async (req, res) => {
   try {
     const { password } = req.body || {};
-    if (!password) return res.status(400).json({ message: 'Şifre gerekli.' });
+    if (!password) return res.status(400).json({ message: 'Åifre gerekli.' });
 
     const user = await userById(req.userId);
-    if (!user) return res.status(404).json({ message: 'Kullanıcı bulunamadı.' });
+    if (!user) return res.status(404).json({ message: 'KullanÄ±cÄ± bulunamadÄ±.' });
 
     const ok = await bcrypt.compare(password, user.password);
-    if (!ok) return res.status(401).json({ message: 'Hatalı şifre.' });
+    if (!ok) return res.status(401).json({ message: 'HatalÄ± ÅŸifre.' });
 
     // Cascade delete user data
     await db.removeWhere('refresh_tokens', { user_id: req.userId }).catch(() => {});
@@ -1051,14 +2121,14 @@ authRouter.delete('/delete-account', authMiddleware, async (req, res) => {
     await db.removeWhere('comment_likes', { user_id: req.userId }).catch(() => {});
     await db.removeWhere('user_privacy', { user_id: req.userId }).catch(() => {});
 
-    // Anonymize posts and comments (don't delete — preserve thread integrity)
+    // Anonymize posts and comments (don't delete â€” preserve thread integrity)
     const userPosts = await db.query('posts', { filters: { user_id: req.userId } });
     for (const p of userPosts) {
-      await db.update('posts', p.id, { user_id: null, content: '[Silinen kullanıcı]' }).catch(() => {});
+      await db.update('posts', p.id, { user_id: null, content: '[Silinen kullanÄ±cÄ±]' }).catch(() => {});
     }
     const userComments = await db.query('comments', { filters: { user_id: req.userId } });
     for (const c of userComments) {
-      await db.update('comments', c.id, { user_id: null, content: '[Silinen kullanıcı]' }).catch(() => {});
+      await db.update('comments', c.id, { user_id: null, content: '[Silinen kullanÄ±cÄ±]' }).catch(() => {});
     }
 
     // Delete listings (cascade: matches, messages related will be orphaned but safe)
@@ -1070,25 +2140,25 @@ authRouter.delete('/delete-account', authMiddleware, async (req, res) => {
     // Finally delete user
     await db.removeWhere('users', { id: req.userId });
 
-    res.json({ message: 'Hesap başarıyla silindi.' });
+    res.json({ message: 'Hesap baÅŸarÄ±yla silindi.' });
   } catch (e) {
     console.error('delete-account error:', e);
-    res.status(500).json({ message: 'Hesap silme hatası.' });
+    res.status(500).json({ message: 'Hesap silme hatasÄ±.' });
   }
 });
 
 app.use('/api/auth', authRouter);
 
-// ══════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 //  PROFILE
-// ══════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 const profileRouter = express.Router();
 profileRouter.use(authMiddleware);
 
 profileRouter.get('/', async (req, res) => {
   try {
     const user = await userById(req.userId);
-    if (!user) return res.status(404).json({ message: 'Kullanıcı bulunamadı.' });
+    if (!user) return res.status(404).json({ message: 'KullanÄ±cÄ± bulunamadÄ±.' });
     res.json({ data: { user: safeUser(user), myListings: [] } });
   } catch (e) { res.status(500).json({ message: e.message }); }
 });
@@ -1096,24 +2166,24 @@ profileRouter.get('/', async (req, res) => {
 profileRouter.patch('/', contentFilter('name', 'bio', 'username'), async (req, res) => {
   try {
     const user = await userById(req.userId);
-    if (!user) return res.status(404).json({ message: 'Kullanıcı bulunamadı.' });
+    if (!user) return res.status(404).json({ message: 'KullanÄ±cÄ± bulunamadÄ±.' });
 
     const body = sanitize(req.body);
 
-    // ── Block inappropriate social media links ──
+    // â”€â”€ Block inappropriate social media links â”€â”€
     const socialFields = ['instagram','tiktok','facebook','twitter','youtube','linkedin','discord','twitch','snapchat','telegram','whatsapp','vk','litmatch'];
     const blockedDomains = ['pornhub','xvideos','xhamster','xnxx','redtube','youporn','brazzers','onlyfans','chaturbate','livejasmin','stripchat','cam4','bongacams','myfreecams','fansly','manyvids'];
     for (const f of socialFields) {
       if (body[f] && typeof body[f] === 'string') {
         const lower = body[f].toLowerCase();
         if (blockedDomains.some(d => lower.includes(d))) {
-          return res.status(400).json({ message: 'Uygunsuz içerik bağlantısı eklenemez.' });
+          return res.status(400).json({ message: 'Uygunsuz iÃ§erik baÄŸlantÄ±sÄ± eklenemez.' });
         }
       }
     }
 
     const changes = {};
-    // cityId, districtId handled specially below — not in auto-map list
+    // cityId, districtId handled specially below â€” not in auto-map list
     const allowed = [
       'name','bio','gender','instagram','tiktok','facebook','twitter',
       'youtube','linkedin','discord','twitch','snapchat','telegram',
@@ -1128,7 +2198,7 @@ profileRouter.patch('/', contentFilter('name', 'bio', 'username'), async (req, r
       }
     }
 
-    // ── cityId / cityName handling ─────────────────────────────────────────
+    // â”€â”€ cityId / cityName handling â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // Flutter geo picker sends local state IDs ("34", "6" ...), but users.city_id
     // is a FK to the backend cities table. Only persist a city_id when it actually
     // resolves in the DB; otherwise store the display name and keep the FK null.
@@ -1156,7 +2226,7 @@ profileRouter.patch('/', contentFilter('name', 'bio', 'username'), async (req, r
       changes.country_code = body.countryCode;
     }
 
-    // ── districtId / districtName handling ──────────────────────────────────
+    // â”€â”€ districtId / districtName handling â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if (body.districtId !== undefined || body.districtName !== undefined) {
       let resolved = false;
       if (body.districtId) {
@@ -1178,7 +2248,7 @@ profileRouter.patch('/', contentFilter('name', 'bio', 'username'), async (req, r
       }
     }
 
-    // Special: sportIds → sports JSONB
+    // Special: sportIds â†’ sports JSONB
     if (body.sportIds !== undefined) {
       const requestedSportIds = Array.isArray(body.sportIds)
         ? body.sportIds
@@ -1195,10 +2265,10 @@ profileRouter.patch('/', contentFilter('name', 'bio', 'username'), async (req, r
           const selectedSports = requestedSportIds
             .map(id => allSports.find(s => s.id === id))
             .filter(Boolean);
-          changes.sports = (selectedSports.length > 0 ? selectedSports : requestedSportIds.map(id => ({ id, name: id, icon: '🏅', category: null })))
+          changes.sports = (selectedSports.length > 0 ? selectedSports : requestedSportIds.map(id => ({ id, name: id, icon: 'ğŸ…', category: null })))
             .map(s => ({ id: s.id, name: s.name, icon: s.icon, category: s.category }));
         } catch {
-          changes.sports = requestedSportIds.map(id => ({ id, name: id, icon: '🏅', category: null }));
+          changes.sports = requestedSportIds.map(id => ({ id, name: id, icon: 'ğŸ…', category: null }));
         }
       }
     }
@@ -1210,13 +2280,13 @@ profileRouter.patch('/', contentFilter('name', 'bio', 'username'), async (req, r
     res.json({ data: { user: safeUser(user) } });
   } catch (e) {
     console.error('profile patch error:', e);
-    res.status(500).json({ message: e.message || 'Profil güncellenemedi.' });
+    res.status(500).json({ message: e.message || 'Profil gÃ¼ncellenemedi.' });
   }
 });
 
 app.use('/api/profile', profileRouter);
 
-// ── Upload with Supabase Storage ─────────────────────────────────────────────
+// â”€â”€ Upload with Supabase Storage â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const multer = require('multer');
 const uploadMiddleware = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
 
@@ -1269,7 +2339,7 @@ app.post('/api/upload', authMiddleware, uploadMiddleware.single('file'), async (
   }
 });
 
-// ── Delete photo (avatar or cover) ───────────────────────────────────────────
+// â”€â”€ Delete photo (avatar or cover) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 app.delete('/api/upload', authMiddleware, async (req, res) => {
   try {
     const type = req.query.type || 'avatar'; // avatar | cover
@@ -1302,13 +2372,13 @@ app.delete('/api/upload', authMiddleware, async (req, res) => {
     res.json({ success: true });
   } catch (e) {
     console.error('Delete upload error:', e);
-    res.status(500).json({ message: 'Sunucu hatası.' });
+    res.status(500).json({ message: 'Sunucu hatasÄ±.' });
   }
 });
 
-// ══════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 //  LISTINGS
-// ══════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 const listingsRouter = express.Router();
 listingsRouter.use(authMiddleware);
 
@@ -1444,7 +2514,7 @@ listingsRouter.get('/nearby', async (req, res) => {
     const userLatitude = toFiniteNumber(latitude);
     const userLongitude = toFiniteNumber(longitude);
     if (!isValidLatitude(userLatitude) || !isValidLongitude(userLongitude)) {
-      return res.status(400).json({ message: 'Geçerli latitude ve longitude gönderilmeli.' });
+      return res.status(400).json({ message: 'GeÃ§erli latitude ve longitude gÃ¶nderilmeli.' });
     }
 
     const radiusMeters = toFiniteNumber(radiusM);
@@ -1542,7 +2612,7 @@ listingsRouter.get('/nearby', async (req, res) => {
 listingsRouter.get('/:id', async (req, res) => {
   try {
     const listing = await listingById(req.params.id);
-    if (!listing) return res.status(404).json({ message: 'İlan bulunamadı.' });
+    if (!listing) return res.status(404).json({ message: 'Ä°lan bulunamadÄ±.' });
 
     // Enrich with applicants (visible to everyone)
     const allInterests = await db.query('interests', { filters: { listing_id: listing.id } });
@@ -1577,23 +2647,23 @@ listingsRouter.post('/', contentFilter('title', 'description'), async (req, res)
     const user = await userById(req.userId);
     const body = sanitize(req.body);
     if (!body.title || body.title.trim().length < 3)
-      return res.status(400).json({ message: 'Başlık en az 3 karakter olmalı.' });
+      return res.status(400).json({ message: 'BaÅŸlÄ±k en az 3 karakter olmalÄ±.' });
     if (!body.sportId)
-      return res.status(400).json({ message: 'Spor dalı seçilmeli.' });
+      return res.status(400).json({ message: 'Spor dalÄ± seÃ§ilmeli.' });
 
-    // ── İlan tarih validasyonu: max 3 gün sonrası ──
+    // â”€â”€ Ä°lan tarih validasyonu: max 3 gÃ¼n sonrasÄ± â”€â”€
     const MAX_LISTING_DAYS = 3;
     if (body.dateTime || body.date) {
       const listingDate = new Date(body.dateTime || body.date);
       if (isNaN(listingDate.getTime()))
-        return res.status(400).json({ message: 'Geçersiz tarih formatı.' });
+        return res.status(400).json({ message: 'GeÃ§ersiz tarih formatÄ±.' });
       const now = new Date();
-      // Geçmiş tarih kontrolü (1 saat tolerans)
+      // GeÃ§miÅŸ tarih kontrolÃ¼ (1 saat tolerans)
       if (listingDate.getTime() < now.getTime() - 3600000)
-        return res.status(400).json({ message: 'Geçmiş bir tarih için ilan açılamaz.' });
+        return res.status(400).json({ message: 'GeÃ§miÅŸ bir tarih iÃ§in ilan aÃ§Ä±lamaz.' });
       const maxDate = new Date(now.getTime() + MAX_LISTING_DAYS * 24 * 3600 * 1000);
       if (listingDate > maxDate)
-        return res.status(400).json({ message: `İlan tarihi en fazla ${MAX_LISTING_DAYS} gün sonrası olabilir.` });
+        return res.status(400).json({ message: `Ä°lan tarihi en fazla ${MAX_LISTING_DAYS} gÃ¼n sonrasÄ± olabilir.` });
     }
 
     const sport = await db.findById('sports', body.sportId);
@@ -1605,19 +2675,19 @@ listingsRouter.post('/', contentFilter('title', 'description'), async (req, res)
       && String(body.longitude).trim() !== '';
 
     if (hasLatitudeInput !== hasLongitudeInput) {
-      return res.status(400).json({ message: 'latitude ve longitude birlikte gönderilmeli.' });
+      return res.status(400).json({ message: 'latitude ve longitude birlikte gÃ¶nderilmeli.' });
     }
 
     const latitude = hasLatitudeInput ? toFiniteNumber(body.latitude) : null;
     const longitude = hasLongitudeInput ? toFiniteNumber(body.longitude) : null;
     if (hasLatitudeInput && (!isValidLatitude(latitude) || !isValidLongitude(longitude))) {
-      return res.status(400).json({ message: 'Geçersiz konum koordinatları.' });
+      return res.status(400).json({ message: 'GeÃ§ersiz konum koordinatlarÄ±.' });
     }
     // NOTE: city_id and district_id have FK constraints to cities/districts tables
     // Flutter sends numeric IDs from states.json (e.g. "2170") but DB has "c1" format
     // So we store null for IDs and rely on city_name/district_name for display
 
-    // expires_at: tarih varsa tarih + 1 gün, yoksa 3 gün sonra
+    // expires_at: tarih varsa tarih + 1 gÃ¼n, yoksa 3 gÃ¼n sonra
     const dateVal = body.dateTime || body.date || null;
     const expiresAt = body.expiresAt
       || (dateVal ? new Date(new Date(dateVal).getTime() + 24 * 3600 * 1000).toISOString()
@@ -1666,9 +2736,9 @@ listingsRouter.post('/', contentFilter('title', 'description'), async (req, res)
 listingsRouter.post('/:id/interest', contentFilter('message'), async (req, res) => {
   try {
     const listing = await listingById(req.params.id);
-    if (!listing) return res.status(404).json({ message: 'İlan bulunamadı.' });
+    if (!listing) return res.status(404).json({ message: 'Ä°lan bulunamadÄ±.' });
     if (listing.user_id === req.userId)
-      return res.status(400).json({ message: 'Kendi ilanınıza başvuramazsınız.' });
+      return res.status(400).json({ message: 'Kendi ilanÄ±nÄ±za baÅŸvuramazsÄ±nÄ±z.' });
 
     const already = await db.findOne('interests', { listing_id: listing.id, user_id: req.userId });
     if (already)
@@ -1685,8 +2755,8 @@ listingsRouter.post('/:id/interest', contentFilter('message'), async (req, res) 
 
     await pushNotification({
       userId: listing.user_id, type: 'NEW_INTEREST',
-      title: 'Yeni başvuru',
-      body: `${me?.name || 'Birisi'} ilanınıza başvurdu.`,
+      title: 'Yeni baÅŸvuru',
+      body: `${me?.name || 'Birisi'} ilanÄ±nÄ±za baÅŸvurdu.`,
       relatedId: listing.id, senderId: req.userId,
     });
 
@@ -1697,7 +2767,7 @@ listingsRouter.post('/:id/interest', contentFilter('message'), async (req, res) 
 listingsRouter.get('/:id/interests', async (req, res) => {
   try {
     const listing = await listingById(req.params.id);
-    if (!listing) return res.status(404).json({ message: 'İlan bulunamadı.' });
+    if (!listing) return res.status(404).json({ message: 'Ä°lan bulunamadÄ±.' });
 
     const pending = await db.query('interests', { filters: { listing_id: listing.id, status: 'PENDING' } });
     const result = [];
@@ -1718,7 +2788,7 @@ listingsRouter.get('/:id/interests', async (req, res) => {
 listingsRouter.patch('/:id', contentFilter('description'), async (req, res) => {
   try {
     const listing = await listingById(req.params.id);
-    if (!listing) return res.status(404).json({ message: 'İlan bulunamadı.' });
+    if (!listing) return res.status(404).json({ message: 'Ä°lan bulunamadÄ±.' });
     if (listing.user_id !== req.userId) return res.status(403).json({ message: 'Yetkisiz.' });
 
     const body = sanitize(req.body);
@@ -1744,18 +2814,18 @@ listingsRouter.patch('/:id', contentFilter('description'), async (req, res) => {
 listingsRouter.patch('/:id/interests/:responseId', async (req, res) => {
   try {
     const listing = await listingById(req.params.id);
-    if (!listing) return res.status(404).json({ message: 'İlan bulunamadı.' });
+    if (!listing) return res.status(404).json({ message: 'Ä°lan bulunamadÄ±.' });
     if (listing.user_id !== req.userId) return res.status(403).json({ message: 'Yetkisiz.' });
 
     const interest = await db.findById('interests', req.params.responseId);
-    if (!interest) return res.status(404).json({ message: 'Başvuru bulunamadı.' });
+    if (!interest) return res.status(404).json({ message: 'BaÅŸvuru bulunamadÄ±.' });
     if (interest.listing_id !== listing.id) {
-      return res.status(400).json({ message: 'Başvuru bu ilana ait değil.' });
+      return res.status(400).json({ message: 'BaÅŸvuru bu ilana ait deÄŸil.' });
     }
 
     const { action } = req.body;
     if (action !== 'ACCEPTED' && action !== 'REJECTED')
-      return res.status(400).json({ message: "action 'ACCEPTED' veya 'REJECTED' olmalı." });
+      return res.status(400).json({ message: "action 'ACCEPTED' veya 'REJECTED' olmalÄ±." });
 
     const currentStatus = String(interest.status || 'PENDING').toUpperCase();
 
@@ -1764,8 +2834,8 @@ listingsRouter.patch('/:id/interests/:responseId', async (req, res) => {
         await db.update('interests', interest.id, { status: action });
         await pushNotification({
           userId: interest.user_id, type: 'RESPONSE_REJECTED',
-          title: 'Başvurunuz reddedildi',
-          body: 'Başvurunuz reddedildi.',
+          title: 'BaÅŸvurunuz reddedildi',
+          body: 'BaÅŸvurunuz reddedildi.',
           relatedId: listing.id, senderId: req.userId,
         });
       }
@@ -1773,7 +2843,7 @@ listingsRouter.patch('/:id/interests/:responseId', async (req, res) => {
     }
 
     if (currentStatus !== 'PENDING') {
-      return res.status(409).json({ message: 'Bu başvuru zaten işlendi.' });
+      return res.status(409).json({ message: 'Bu baÅŸvuru zaten iÅŸlendi.' });
     }
 
     const currentAccepted = listing.accepted_count || 0;
@@ -1784,11 +2854,11 @@ listingsRouter.patch('/:id/interests/:responseId', async (req, res) => {
         userId: interest.user_id,
         type: 'QUOTA_FULL',
         title: 'Kontenjan doldu',
-        body: 'İlanın kontenjanı dolduğu için başvurunuz otomatik reddedildi.',
+        body: 'Ä°lanÄ±n kontenjanÄ± dolduÄŸu iÃ§in baÅŸvurunuz otomatik reddedildi.',
         relatedId: listing.id,
         senderId: req.userId,
       });
-      return res.status(409).json({ message: 'İlan kontenjanı doldu.' });
+      return res.status(409).json({ message: 'Ä°lan kontenjanÄ± doldu.' });
     }
 
     if (listing.date) {
@@ -1814,7 +2884,7 @@ listingsRouter.patch('/:id/interests/:responseId', async (req, res) => {
 
         if ((ownerConflict.count || 0) > 0 || (applicantConflict.count || 0) > 0) {
           return res.status(409).json({
-            message: 'Bu tarih ve saatte mevcut bir eşleşme var. Lütfen farklı bir zaman seçin.',
+            message: 'Bu tarih ve saatte mevcut bir eÅŸleÅŸme var. LÃ¼tfen farklÄ± bir zaman seÃ§in.',
           });
         }
       }
@@ -1917,7 +2987,7 @@ listingsRouter.patch('/:id/interests/:responseId', async (req, res) => {
             userId: pending.user_id,
             type: 'QUOTA_FULL',
             title: 'Kontenjan doldu',
-            body: 'İlan kontenjanı dolduğu için başvurunuz otomatik reddedildi.',
+            body: 'Ä°lan kontenjanÄ± dolduÄŸu iÃ§in baÅŸvurunuz otomatik reddedildi.',
             relatedId: listing.id,
             senderId: req.userId,
           });
@@ -1928,15 +2998,15 @@ listingsRouter.patch('/:id/interests/:responseId', async (req, res) => {
       if (match) {
         await pushNotification({
           userId: interest.user_id, type: 'RESPONSE_ACCEPTED',
-          title: 'Başvurunuz kabul edildi!',
-          body: `${u1?.name || 'İlan sahibi'} başvurunuzu kabul etti.`,
+          title: 'BaÅŸvurunuz kabul edildi!',
+          body: `${u1?.name || 'Ä°lan sahibi'} baÅŸvurunuzu kabul etti.`,
           relatedId: match.id, senderId: req.userId,
         });
       } else if (isGroupListing && isFull && groupMatch) {
         const matchLink = `/matches/${groupMatch.id}`;
         const notifiedIds = new Set();
         const participantLabel = formatNameList(groupParticipantNames);
-        const sportLabel = sport?.name || listing.sport_name || 'spor etkinliği';
+        const sportLabel = sport?.name || listing.sport_name || 'spor etkinliÄŸi';
 
         for (const participantId of groupParticipantIds) {
           if (!participantId || notifiedIds.has(participantId)) continue;
@@ -1944,10 +3014,10 @@ listingsRouter.patch('/:id/interests/:responseId', async (req, res) => {
           await pushNotification({
             userId: participantId,
             type: 'NEW_MATCH',
-            title: 'İlanın kotası tamamlandı',
+            title: 'Ä°lanÄ±n kotasÄ± tamamlandÄ±',
             body: participantLabel
-              ? `${participantLabel} ${sportLabel} için eşleştiler.`
-              : `İlanın kontenjanı doldu. ${sportLabel} için grup eşleşmesi tamamlandı.`,
+              ? `${participantLabel} ${sportLabel} iÃ§in eÅŸleÅŸtiler.`
+              : `Ä°lanÄ±n kontenjanÄ± doldu. ${sportLabel} iÃ§in grup eÅŸleÅŸmesi tamamlandÄ±.`,
             relatedId: groupMatch.id,
             link: matchLink,
             senderId: req.userId,
@@ -1959,8 +3029,8 @@ listingsRouter.patch('/:id/interests/:responseId', async (req, res) => {
         await pushNotification({
           userId: interest.user_id,
           type: 'RESPONSE_ACCEPTED',
-          title: 'Başvurunuz onaylandı',
-          body: `${u1?.name || 'İlan sahibi'} başvurunuzu onayladı. Kontenjan dolunca grup eşleşmesi tamamlanacak.`,
+          title: 'BaÅŸvurunuz onaylandÄ±',
+          body: `${u1?.name || 'Ä°lan sahibi'} baÅŸvurunuzu onayladÄ±. Kontenjan dolunca grup eÅŸleÅŸmesi tamamlanacak.`,
           relatedId: null,
           link: `/listings/${listing.id}`,
           senderId: req.userId,
@@ -2003,26 +3073,26 @@ listingsRouter.patch('/:id/interests/:responseId', async (req, res) => {
 listingsRouter.delete('/:id', async (req, res) => {
   try {
     const listing = await listingById(req.params.id);
-    if (!listing) return res.status(404).json({ message: 'İlan bulunamadı.' });
+    if (!listing) return res.status(404).json({ message: 'Ä°lan bulunamadÄ±.' });
     if (listing.user_id !== req.userId) return res.status(403).json({ message: 'Yetkisiz.' });
     await db.removeWhere('interests', { listing_id: listing.id });
     await db.remove('listings', listing.id);
-    res.json({ message: 'İlan silindi.' });
+    res.json({ message: 'Ä°lan silindi.' });
   } catch (e) { res.status(500).json({ message: e.message }); }
 });
 
 listingsRouter.delete('/:id/interest', async (req, res) => {
   try {
     await db.removeWhere('interests', { listing_id: req.params.id, user_id: req.userId });
-    res.json({ message: 'Başvuru geri çekildi.' });
+    res.json({ message: 'BaÅŸvuru geri Ã§ekildi.' });
   } catch (e) { res.status(500).json({ message: e.message }); }
 });
 
 app.use('/api/listings', listingsRouter);
 
-// ══════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 //  MATCHES
-// ══════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 const matchesRouter = express.Router();
 matchesRouter.use(authMiddleware);
 
@@ -2209,11 +3279,11 @@ matchesRouter.get('/', async (req, res) => {
 matchesRouter.get('/:id', async (req, res) => {
   try {
     const m = await db.findById('matches', req.params.id);
-    if (!m) return res.status(404).json({ message: 'Maç bulunamadı.' });
+    if (!m) return res.status(404).json({ message: 'MaÃ§ bulunamadÄ±.' });
     const listing = m.listing_id ? await listingById(m.listing_id) : null;
     const participantIds = await getMatchParticipantIds(m, listing);
     if (!participantIds.includes(req.userId)) {
-      return res.status(403).json({ message: 'Bu maçın katılımcısı değilsiniz.' });
+      return res.status(403).json({ message: 'Bu maÃ§Ä±n katÄ±lÄ±mcÄ±sÄ± deÄŸilsiniz.' });
     }
 
     const displayUser2Id = pickDisplayUser2IdForViewer({
@@ -2263,12 +3333,12 @@ matchesRouter.get('/:id', async (req, res) => {
 matchesRouter.post('/:id/complete', async (req, res) => {
   try {
     const m = await db.findById('matches', req.params.id);
-    if (!m) return res.status(404).json({ message: 'Maç bulunamadı.' });
+    if (!m) return res.status(404).json({ message: 'MaÃ§ bulunamadÄ±.' });
 
     const listing = m.listing_id ? await listingById(m.listing_id) : null;
     const participantIds = await getMatchParticipantIds(m, listing);
     if (!participantIds.includes(req.userId)) {
-      return res.status(403).json({ message: 'Bu maçın katılımcısı değilsiniz.' });
+      return res.status(403).json({ message: 'Bu maÃ§Ä±n katÄ±lÄ±mcÄ±sÄ± deÄŸilsiniz.' });
     }
 
     const updated = await db.update('matches', m.id, { status: 'COMPLETED', completed_at: new Date().toISOString() });
@@ -2279,14 +3349,14 @@ matchesRouter.post('/:id/complete', async (req, res) => {
 matchesRouter.patch('/:id/approve', async (req, res) => {
   try {
     const m = await db.findById('matches', req.params.id);
-    if (!m) return res.status(404).json({ message: 'Maç bulunamadı.' });
+    if (!m) return res.status(404).json({ message: 'MaÃ§ bulunamadÄ±.' });
     if (m.status === 'COMPLETED' || m.status === 'CANCELLED') return res.json({ data: toCamel(m) });
 
     const listing = m.listing_id ? await listingById(m.listing_id) : null;
     const participantIds = await getMatchParticipantIds(m, listing);
     const participantSet = new Set(participantIds);
     if (!participantSet.has(req.userId)) {
-      return res.status(403).json({ message: 'Bu maçın katılımcısı değilsiniz.' });
+      return res.status(403).json({ message: 'Bu maÃ§Ä±n katÄ±lÄ±mcÄ±sÄ± deÄŸilsiniz.' });
     }
 
     const isGroupMatch = isGroupMatchRecord(m, listing);
@@ -2322,10 +3392,10 @@ matchesRouter.patch('/:id/approve', async (req, res) => {
         await pushNotification({
           userId: user.id,
           type: 'MATCH_COMPLETED',
-          title: '⭐ Değerlendirme Zamanı!',
+          title: 'â­ DeÄŸerlendirme ZamanÄ±!',
           body: isGroupMatch
-            ? 'Grup maçı tamamlandı. Partnerlerini değerlendirebilirsin.'
-            : `${approver?.name || 'Rakibin'} maçı oynadığını onayladı`,
+            ? 'Grup maÃ§Ä± tamamlandÄ±. Partnerlerini deÄŸerlendirebilirsin.'
+            : `${approver?.name || 'Rakibin'} maÃ§Ä± oynadÄ±ÄŸÄ±nÄ± onayladÄ±`,
           relatedId: m.id,
           senderId: req.userId,
           senderName: approver?.name,
@@ -2352,8 +3422,8 @@ matchesRouter.patch('/:id/approve', async (req, res) => {
         await pushNotification({
           userId: awaitingId,
           type: 'MATCH_STATUS_CHANGED',
-          title: '⚽ Maçı Oynadınız mı?',
-          body: `${approver?.name || 'Rakibin'} maçı oynadığını onayladı`,
+          title: 'âš½ MaÃ§Ä± OynadÄ±nÄ±z mÄ±?',
+          body: `${approver?.name || 'Rakibin'} maÃ§Ä± oynadÄ±ÄŸÄ±nÄ± onayladÄ±`,
           relatedId: m.id,
           senderId: req.userId,
           senderName: approver?.name,
@@ -2370,16 +3440,16 @@ matchesRouter.patch('/:id/approve', async (req, res) => {
 matchesRouter.post('/:id/otp/request', async (req, res) => {
   try {
     const m = await db.findById('matches', req.params.id);
-    if (!m) return res.status(404).json({ message: 'Maç bulunamadı.' });
+    if (!m) return res.status(404).json({ message: 'MaÃ§ bulunamadÄ±.' });
 
     const listing = m.listing_id ? await listingById(m.listing_id) : null;
     const participantIds = await getMatchParticipantIds(m, listing);
     const participantSet = new Set(participantIds);
     if (!participantSet.has(req.userId))
-      return res.status(403).json({ message: 'Bu maçın katılımcısı değilsiniz.' });
+      return res.status(403).json({ message: 'Bu maÃ§Ä±n katÄ±lÄ±mcÄ±sÄ± deÄŸilsiniz.' });
 
     if (m.status === 'COMPLETED' || m.status === 'CANCELLED') {
-      return res.status(400).json({ message: 'Bu maç için OTP gönderilemez.' });
+      return res.status(400).json({ message: 'Bu maÃ§ iÃ§in OTP gÃ¶nderilemez.' });
     }
 
     const code = String(Math.floor(100000 + Math.random() * 900000));
@@ -2398,28 +3468,28 @@ matchesRouter.post('/:id/otp/request', async (req, res) => {
     if (otherId) {
       await pushNotification({
         userId: otherId, type: 'MATCH_OTP_REQUESTED',
-        title: '🔐 Doğrulama Kodu İstendi',
-        body: `${requester?.name || 'Rakibin'} maç doğrulaması için kod istedi.`,
+        title: 'ğŸ” DoÄŸrulama Kodu Ä°stendi',
+        body: `${requester?.name || 'Rakibin'} maÃ§ doÄŸrulamasÄ± iÃ§in kod istedi.`,
         relatedId: m.id, senderId: req.userId,
       });
     }
 
-    res.json({ message: 'Doğrulama kodu oluşturuldu.', devCode: code, expiresAt });
+    res.json({ message: 'DoÄŸrulama kodu oluÅŸturuldu.', devCode: code, expiresAt });
   } catch (e) { res.status(500).json({ message: e.message }); }
 });
 
 matchesRouter.post('/:id/otp/verify', async (req, res) => {
   try {
     const { code } = req.body;
-    if (!code) return res.status(400).json({ message: 'Doğrulama kodu gerekli.' });
+    if (!code) return res.status(400).json({ message: 'DoÄŸrulama kodu gerekli.' });
 
     const m = await db.findById('matches', req.params.id);
-    if (!m) return res.status(404).json({ message: 'Maç bulunamadı.' });
+    if (!m) return res.status(404).json({ message: 'MaÃ§ bulunamadÄ±.' });
 
     const listing = m.listing_id ? await listingById(m.listing_id) : null;
     const participantIds = await getMatchParticipantIds(m, listing);
     if (!participantIds.includes(req.userId)) {
-      return res.status(403).json({ message: 'Bu maçın katılımcısı değilsiniz.' });
+      return res.status(403).json({ message: 'Bu maÃ§Ä±n katÄ±lÄ±mcÄ±sÄ± deÄŸilsiniz.' });
     }
 
     const client = db.raw();
@@ -2429,12 +3499,12 @@ matchesRouter.post('/:id/otp/verify', async (req, res) => {
       .limit(1);
 
     const otp = otps?.[0];
-    if (!otp) return res.status(400).json({ message: 'Geçersiz veya süresi dolmuş doğrulama kodu.' });
+    if (!otp) return res.status(400).json({ message: 'GeÃ§ersiz veya sÃ¼resi dolmuÅŸ doÄŸrulama kodu.' });
 
     await db.update('otps', otp.id, { used_at: new Date().toISOString() });
     const newTrust = Math.min(100, (m.trust_score || 0) + 40);
     await db.update('matches', m.id, { trust_score: newTrust });
-    res.json({ message: 'Maç doğrulandı.', trustScore: newTrust });
+    res.json({ message: 'MaÃ§ doÄŸrulandÄ±.', trustScore: newTrust });
   } catch (e) { res.status(500).json({ message: e.message }); }
 });
 
@@ -2444,27 +3514,27 @@ matchesRouter.post('/:id/gps/verify', async (req, res) => {
     const longitude = toFiniteNumber(req.body?.longitude);
 
     if (!isValidLatitude(latitude) || !isValidLongitude(longitude)) {
-      return res.status(400).json({ message: 'Geçerli enlem ve boylam gerekli.' });
+      return res.status(400).json({ message: 'GeÃ§erli enlem ve boylam gerekli.' });
     }
 
     const m = await db.findById('matches', req.params.id);
-    if (!m) return res.status(404).json({ message: 'Maç bulunamadı.' });
+    if (!m) return res.status(404).json({ message: 'MaÃ§ bulunamadÄ±.' });
 
     const listing = m.listing_id ? await listingById(m.listing_id) : null;
     const participantIds = await getMatchParticipantIds(m, listing);
     if (!participantIds.includes(req.userId)) {
-      return res.status(403).json({ message: 'Bu maçın katılımcısı değilsiniz.' });
+      return res.status(403).json({ message: 'Bu maÃ§Ä±n katÄ±lÄ±mcÄ±sÄ± deÄŸilsiniz.' });
     }
 
     if (!hasMatchLocationVerificationsTable) {
-      return res.status(503).json({ message: 'GPS doğrulama altyapısı hazır değil. Migration çalıştırılmalı.' });
+      return res.status(503).json({ message: 'GPS doÄŸrulama altyapÄ±sÄ± hazÄ±r deÄŸil. Migration Ã§alÄ±ÅŸtÄ±rÄ±lmalÄ±.' });
     }
 
     const nowIso = new Date().toISOString();
 
     let verificationRows = (await getMatchLocationVerificationRows([m.id])).get(m.id) || [];
     if (!hasMatchLocationVerificationsTable) {
-      return res.status(503).json({ message: 'GPS doğrulama altyapısı hazır değil. Migration çalıştırılmalı.' });
+      return res.status(503).json({ message: 'GPS doÄŸrulama altyapÄ±sÄ± hazÄ±r deÄŸil. Migration Ã§alÄ±ÅŸtÄ±rÄ±lmalÄ±.' });
     }
 
     const existing = verificationRows.find(row => row.user_id === req.userId);
@@ -2516,8 +3586,8 @@ matchesRouter.post('/:id/gps/verify', async (req, res) => {
 
     res.json({
       message: myVerified
-        ? 'Konum doğrulandı.'
-        : 'Konum kaydedildi. Karşı taraf doğrulaması bekleniyor.',
+        ? 'Konum doÄŸrulandÄ±.'
+        : 'Konum kaydedildi. KarÅŸÄ± taraf doÄŸrulamasÄ± bekleniyor.',
       trustScore,
       gpsVerified: myVerified,
       waitingForOthers: !myVerified,
@@ -2526,7 +3596,7 @@ matchesRouter.post('/:id/gps/verify', async (req, res) => {
   } catch (e) {
     if (isMissingRelationError(e, 'match_location_verifications')) {
       hasMatchLocationVerificationsTable = false;
-      return res.status(503).json({ message: 'GPS doğrulama altyapısı hazır değil. Migration çalıştırılmalı.' });
+      return res.status(503).json({ message: 'GPS doÄŸrulama altyapÄ±sÄ± hazÄ±r deÄŸil. Migration Ã§alÄ±ÅŸtÄ±rÄ±lmalÄ±.' });
     }
     res.status(500).json({ message: e.message });
   }
@@ -2535,15 +3605,15 @@ matchesRouter.post('/:id/gps/verify', async (req, res) => {
 matchesRouter.post('/:id/noshow', async (req, res) => {
   try {
     const m = await db.findById('matches', req.params.id);
-    if (!m) return res.status(404).json({ message: 'Maç bulunamadı.' });
+    if (!m) return res.status(404).json({ message: 'MaÃ§ bulunamadÄ±.' });
 
     const listing = m.listing_id ? await listingById(m.listing_id) : null;
     const participantIds = await getMatchParticipantIds(m, listing);
     if (!participantIds.includes(req.userId))
-      return res.status(403).json({ message: 'Bu maçın katılımcısı değilsiniz.' });
+      return res.status(403).json({ message: 'Bu maÃ§Ä±n katÄ±lÄ±mcÄ±sÄ± deÄŸilsiniz.' });
 
     const already = await db.findOne('noshows', { match_id: m.id, reporter_id: req.userId });
-    if (already) return res.status(409).json({ message: 'Bu maç için zaten rapor ettiniz.' });
+    if (already) return res.status(409).json({ message: 'Bu maÃ§ iÃ§in zaten rapor ettiniz.' });
 
     let reportedId = req.userId === m.user1_id ? m.user2_id : m.user1_id;
     if (req.userId === m.user1_id && isGroupMatchRecord(m, listing)) {
@@ -2558,8 +3628,8 @@ matchesRouter.post('/:id/noshow', async (req, res) => {
     const reporter = await userById(req.userId);
     await pushNotification({
       userId: reportedId, type: 'NO_SHOW_WARNING',
-      title: '⚠️ Gelmedi Raporu',
-      body: `${reporter?.name || 'Rakibin'} maça gelmediğinizi bildirdi.`,
+      title: 'âš ï¸ Gelmedi Raporu',
+      body: `${reporter?.name || 'Rakibin'} maÃ§a gelmediÄŸinizi bildirdi.`,
       relatedId: m.id, senderId: req.userId,
     });
     res.json({ message: 'Rapor kaydedildi.' });
@@ -2568,9 +3638,9 @@ matchesRouter.post('/:id/noshow', async (req, res) => {
 
 app.use('/api/matches', matchesRouter);
 
-// ══════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 //  CONVERSATIONS & MESSAGES
-// ══════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 const convsRouter = express.Router();
 convsRouter.use(authMiddleware);
 
@@ -2657,9 +3727,9 @@ convsRouter.get('/', async (req, res) => {
 convsRouter.patch('/:id/read', async (req, res) => {
   try {
     const conv = await db.findById('conversations', req.params.id);
-    if (!conv) return res.status(404).json({ message: 'Konuşma bulunamadı.' });
+    if (!conv) return res.status(404).json({ message: 'KonuÅŸma bulunamadÄ±.' });
     if (conv.user1_id !== req.userId && conv.user2_id !== req.userId) {
-      return res.status(403).json({ message: 'Bu konuşmaya erişiminiz yok.' });
+      return res.status(403).json({ message: 'Bu konuÅŸmaya eriÅŸiminiz yok.' });
     }
     const unreadFor = normalizeJsonObject(conv.unread_for);
     unreadFor[req.userId] = 0;
@@ -2682,11 +3752,11 @@ convsRouter.post('/:id/messages', contentFilter('content'), async (req, res) => 
   try {
     const { content } = req.body;
     if (!content || content.trim().length < 1)
-      return res.status(400).json({ message: 'Mesaj içeriği gerekli.' });
+      return res.status(400).json({ message: 'Mesaj iÃ§eriÄŸi gerekli.' });
     const conv = await db.findById('conversations', req.params.id);
-    if (!conv) return res.status(404).json({ message: 'Konuşma bulunamadı.' });
+    if (!conv) return res.status(404).json({ message: 'KonuÅŸma bulunamadÄ±.' });
     if (conv.user1_id !== req.userId && conv.user2_id !== req.userId) {
-      return res.status(403).json({ message: 'Bu konuşmaya erişiminiz yok.' });
+      return res.status(403).json({ message: 'Bu konuÅŸmaya eriÅŸiminiz yok.' });
     }
 
     const trimmedContent = content.trim();
@@ -2710,7 +3780,7 @@ convsRouter.post('/:id/messages', contentFilter('content'), async (req, res) => 
       userId: otherUserId,
       type: 'NEW_MESSAGE',
       title: 'Yeni mesaj',
-      body: `${sender?.name || 'Birisi'} size mesaj gönderdi.`,
+      body: `${sender?.name || 'Birisi'} size mesaj gÃ¶nderdi.`,
       relatedId: req.params.id,
       senderId: req.userId,
       senderName: sender?.name,
@@ -2723,16 +3793,16 @@ convsRouter.post('/:id/messages', contentFilter('content'), async (req, res) => 
 
 app.use('/api/conversations', convsRouter);
 
-// ══════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 //  USERS (profile, follow, block)
-// ══════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 const usersRouter = express.Router();
 usersRouter.use(authMiddleware);
 
 usersRouter.get('/me/referral', async (req, res) => {
   try {
     const user = await userById(req.userId);
-    if (!user) return res.status(404).json({ message: 'Kullanıcı bulunamadı.' });
+    if (!user) return res.status(404).json({ message: 'KullanÄ±cÄ± bulunamadÄ±.' });
     const code = user.referral_code || `SP${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
     if (!user.referral_code) await db.update('users', user.id, { referral_code: code });
     const referred = await db.query('users', { filters: { referred_by: code } });
@@ -2749,7 +3819,7 @@ usersRouter.get('/me/referral', async (req, res) => {
 usersRouter.get('/:id', async (req, res) => {
   try {
     const user = await userById(req.params.id);
-    if (!user) return res.status(404).json({ message: 'Kullanıcı bulunamadı.' });
+    if (!user) return res.status(404).json({ message: 'KullanÄ±cÄ± bulunamadÄ±.' });
 
     const follow = await db.findOne('follows', { follower_id: req.userId, following_id: user.id });
     const isBlockedByMe = !!(await db.findOne('blocked_users', { blocker_id: req.userId, blocked_id: user.id }));
@@ -2839,7 +3909,7 @@ usersRouter.post('/:id/follow', async (req, res) => {
     }
 
     const target = await userById(targetId);
-    if (!target) return res.status(404).json({ message: 'Kullanıcı bulunamadı.' });
+    if (!target) return res.status(404).json({ message: 'KullanÄ±cÄ± bulunamadÄ±.' });
 
     const status = target.is_private ? 'pending' : 'accepted';
     await db.insert('follows', { id: uuid(), follower_id: req.userId, following_id: targetId, status });
@@ -2854,8 +3924,8 @@ usersRouter.post('/:id/follow', async (req, res) => {
     await pushNotification({
       userId: targetId,
       type: status === 'pending' ? 'FOLLOW_REQUEST' : 'NEW_FOLLOWER',
-      title: status === 'pending' ? 'Yeni takip isteği' : 'Seni takip etmeye başladı',
-      body: `${me?.name || 'Birisi'} ${status === 'pending' ? 'seni takip etmek istiyor' : 'seni takip etmeye başladı'}.`,
+      title: status === 'pending' ? 'Yeni takip isteÄŸi' : 'Seni takip etmeye baÅŸladÄ±',
+      body: `${me?.name || 'Birisi'} ${status === 'pending' ? 'seni takip etmek istiyor' : 'seni takip etmeye baÅŸladÄ±'}.`,
       relatedId: req.userId, senderId: req.userId,
       senderName: me?.name, senderAvatar: me?.avatar_url,
     });
@@ -2866,7 +3936,7 @@ usersRouter.post('/:id/follow', async (req, res) => {
 usersRouter.get('/:id/followers', async (req, res) => {
   try {
     const targetUser = await userById(req.params.id);
-    if (!targetUser) return res.status(404).json({ message: 'Kullanıcı bulunamadı.' });
+    if (!targetUser) return res.status(404).json({ message: 'KullanÄ±cÄ± bulunamadÄ±.' });
     if (targetUser.is_bot && req.userId !== targetUser.id) {
       return res.status(403).json({ message: 'Bot takip listesi gizlidir.' });
     }
@@ -2891,7 +3961,7 @@ usersRouter.get('/:id/followers', async (req, res) => {
 usersRouter.get('/:id/following', async (req, res) => {
   try {
     const targetUser = await userById(req.params.id);
-    if (!targetUser) return res.status(404).json({ message: 'Kullanıcı bulunamadı.' });
+    if (!targetUser) return res.status(404).json({ message: 'KullanÄ±cÄ± bulunamadÄ±.' });
     if (targetUser.is_bot && req.userId !== targetUser.id) {
       return res.status(403).json({ message: 'Bot takip listesi gizlidir.' });
     }
@@ -2916,13 +3986,13 @@ usersRouter.get('/:id/following', async (req, res) => {
 usersRouter.delete('/:id/followers', async (req, res) => {
   try {
     const f = await db.findOne('follows', { follower_id: req.params.id, following_id: req.userId, status: 'accepted' });
-    if (!f) return res.status(404).json({ message: 'Takipçi bulunamadı.' });
+    if (!f) return res.status(404).json({ message: 'TakipÃ§i bulunamadÄ±.' });
     await db.remove('follows', f.id);
     const me = await userById(req.userId);
     const follower = await userById(req.params.id);
     if (me) await db.update('users', req.userId, { follower_count: Math.max(0, (me.follower_count || 1) - 1) });
     if (follower) await db.update('users', req.params.id, { following_count: Math.max(0, (follower.following_count || 1) - 1) });
-    res.json({ message: 'Takipçi kaldırıldı.' });
+    res.json({ message: 'TakipÃ§i kaldÄ±rÄ±ldÄ±.' });
   } catch (e) { res.status(500).json({ message: e.message }); }
 });
 
@@ -2935,19 +4005,19 @@ usersRouter.post('/:id/block', async (req, res) => {
     // Remove follow relationships
     await db.removeWhere('follows', { follower_id: req.userId, following_id: targetId }).catch(() => {});
     await db.removeWhere('follows', { follower_id: targetId, following_id: req.userId }).catch(() => {});
-    res.json({ message: 'Kullanıcı engellendi.' });
+    res.json({ message: 'KullanÄ±cÄ± engellendi.' });
   } catch (e) { res.status(500).json({ message: e.message }); }
 });
 
 usersRouter.delete('/:id/block', async (req, res) => {
   try {
     await db.removeWhere('blocked_users', { blocker_id: req.userId, blocked_id: req.params.id });
-    res.json({ message: 'Engel kaldırıldı.' });
+    res.json({ message: 'Engel kaldÄ±rÄ±ldÄ±.' });
   } catch (e) { res.status(500).json({ message: e.message }); }
 });
 
 usersRouter.post('/:id/report', async (req, res) => {
-  res.json({ message: 'Şikayet alındı.' });
+  res.json({ message: 'Åikayet alÄ±ndÄ±.' });
 });
 
 usersRouter.get('/:id/ratings', async (req, res) => {
@@ -2972,9 +4042,9 @@ usersRouter.get('/:id/ratings', async (req, res) => {
 
 app.use('/api/users', usersRouter);
 
-// ══════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 //  FOLLOWS (requests)
-// ══════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 const followsRouter = express.Router();
 followsRouter.use(authMiddleware);
 
@@ -2994,8 +4064,8 @@ followsRouter.patch('/:id', async (req, res) => {
   try {
     const { action } = req.body;
     const follow = await db.findById('follows', req.params.id);
-    if (!follow) return res.status(404).json({ message: 'İstek bulunamadı.' });
-    if (follow.following_id !== req.userId) return res.status(403).json({ message: 'Bu isteği yanıtlama yetkiniz yok.' });
+    if (!follow) return res.status(404).json({ message: 'Ä°stek bulunamadÄ±.' });
+    if (follow.following_id !== req.userId) return res.status(403).json({ message: 'Bu isteÄŸi yanÄ±tlama yetkiniz yok.' });
 
     if (action === 'ACCEPTED') {
       await db.update('follows', follow.id, { status: 'accepted' });
@@ -3005,14 +4075,14 @@ followsRouter.patch('/:id', async (req, res) => {
       if (follower) await db.update('users', follower.id, { following_count: (follower.following_count || 0) + 1 });
       await pushNotification({
         userId: follow.follower_id, type: 'FOLLOW_ACCEPTED',
-        title: 'Takip isteğin kabul edildi',
-        body: `${target?.name || 'Birisi'} takip isteğini kabul etti.`,
+        title: 'Takip isteÄŸin kabul edildi',
+        body: `${target?.name || 'Birisi'} takip isteÄŸini kabul etti.`,
         relatedId: req.userId,
       });
-      res.json({ message: 'İstek kabul edildi.', follow: toCamel({ ...follow, status: 'accepted' }) });
+      res.json({ message: 'Ä°stek kabul edildi.', follow: toCamel({ ...follow, status: 'accepted' }) });
     } else {
       await db.remove('follows', follow.id);
-      res.json({ message: 'İstek reddedildi.' });
+      res.json({ message: 'Ä°stek reddedildi.' });
     }
   } catch (e) { res.status(500).json({ message: e.message }); }
 });
@@ -3023,7 +4093,7 @@ followsRouter.post('/respond-by-user', async (req, res) => {
     const { followerId, action } = req.body;
     if (!followerId) return res.status(400).json({ message: 'followerId gerekli.' });
     const pending = await db.query('follows', { filters: { follower_id: followerId, following_id: req.userId, status: 'pending' } });
-    if (!pending.length) return res.status(404).json({ message: 'Bekleyen istek bulunamadı.' });
+    if (!pending.length) return res.status(404).json({ message: 'Bekleyen istek bulunamadÄ±.' });
     const follow = pending[0];
     if (action === 'ACCEPTED') {
       await db.update('follows', follow.id, { status: 'accepted' });
@@ -3033,24 +4103,24 @@ followsRouter.post('/respond-by-user', async (req, res) => {
       if (follower) await db.update('users', follower.id, { following_count: (follower.following_count || 0) + 1 });
       await pushNotification({
         userId: followerId, type: 'FOLLOW_ACCEPTED',
-        title: 'Takip isteğin kabul edildi',
-        body: `${target?.name || 'Birisi'} takip isteğini kabul etti.`,
+        title: 'Takip isteÄŸin kabul edildi',
+        body: `${target?.name || 'Birisi'} takip isteÄŸini kabul etti.`,
         relatedId: req.userId, senderId: req.userId,
         senderName: target?.name, senderAvatar: target?.avatar_url,
       });
-      res.json({ message: 'İstek kabul edildi.' });
+      res.json({ message: 'Ä°stek kabul edildi.' });
     } else {
       await db.remove('follows', follow.id);
-      res.json({ message: 'İstek reddedildi.' });
+      res.json({ message: 'Ä°stek reddedildi.' });
     }
   } catch (e) { res.status(500).json({ message: e.message }); }
 });
 
 app.use('/api/follows', followsRouter);
 
-// ══════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 //  CHALLENGES
-// ══════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 const challengesRouter = express.Router();
 challengesRouter.use(authMiddleware);
 
@@ -3105,14 +4175,14 @@ challengesRouter.get('/', async (req, res) => {
 challengesRouter.post('/', contentFilter('message'), async (req, res) => {
   try {
     const { targetId, sportId } = req.body;
-    if (!targetId || !sportId) return res.status(400).json({ message: 'Hedef kullanıcı ve spor gerekli.' });
-    if (targetId === req.userId) return res.status(400).json({ message: 'Kendinize teklif gönderemezsiniz.' });
+    if (!targetId || !sportId) return res.status(400).json({ message: 'Hedef kullanÄ±cÄ± ve spor gerekli.' });
+    if (targetId === req.userId) return res.status(400).json({ message: 'Kendinize teklif gÃ¶nderemezsiniz.' });
 
     const target = await userById(targetId);
-    if (!target) return res.status(404).json({ message: 'Kullanıcı bulunamadı.' });
+    if (!target) return res.status(404).json({ message: 'KullanÄ±cÄ± bulunamadÄ±.' });
 
     const dup = await db.findOne('challenges', { sender_id: req.userId, target_id: targetId, sport_id: sportId, status: 'PENDING' });
-    if (dup) return res.status(409).json({ message: 'Bu spor için zaten bekleyen bir teklifiniz var.' });
+    if (dup) return res.status(409).json({ message: 'Bu spor iÃ§in zaten bekleyen bir teklifiniz var.' });
 
     const challenge = {
       id: uuid(), sender_id: req.userId, target_id: targetId,
@@ -3130,8 +4200,8 @@ challengesRouter.post('/', contentFilter('message'), async (req, res) => {
     await pushNotification({
       userId: targetId,
       type: 'DIRECT_CHALLENGE',
-      title: `${challenge.challenge_type === 'RIVAL' ? '⚔️ Rakip' : '🤝 Partner'} Teklifi!`,
-      body: `${me?.name || 'Birisi'} sana ${sport?.name || 'spor'} teklifi gönderdi.`,
+      title: `${challenge.challenge_type === 'RIVAL' ? 'âš”ï¸ Rakip' : 'ğŸ¤ Partner'} Teklifi!`,
+      body: `${me?.name || 'Birisi'} sana ${sport?.name || 'spor'} teklifi gÃ¶nderdi.`,
       relatedId: challenge.id, link: '/challenges',
       senderId: req.userId, senderName: me?.name, senderAvatar: me?.avatar_url,
     });
@@ -3143,13 +4213,13 @@ challengesRouter.post('/', contentFilter('message'), async (req, res) => {
 challengesRouter.patch('/:id', async (req, res) => {
   try {
     const c = await db.findById('challenges', req.params.id);
-    if (!c) return res.status(404).json({ message: 'Teklif bulunamadı.' });
-    if (c.target_id !== req.userId) return res.status(403).json({ message: 'Bu teklif size ait değil.' });
-    if (c.status !== 'PENDING') return res.status(400).json({ message: 'Bu teklif zaten yanıtlandı.' });
+    if (!c) return res.status(404).json({ message: 'Teklif bulunamadÄ±.' });
+    if (c.target_id !== req.userId) return res.status(403).json({ message: 'Bu teklif size ait deÄŸil.' });
+    if (c.status !== 'PENDING') return res.status(400).json({ message: 'Bu teklif zaten yanÄ±tlandÄ±.' });
 
     const action = String(req.body.action || '').toUpperCase();
     if (action !== 'ACCEPTED' && action !== 'REJECTED')
-      return res.status(400).json({ message: 'Geçersiz işlem.' });
+      return res.status(400).json({ message: 'GeÃ§ersiz iÅŸlem.' });
 
     await db.update('challenges', c.id, { status: action });
 
@@ -3185,7 +4255,7 @@ challengesRouter.patch('/:id', async (req, res) => {
 
       await pushNotification({
         userId: c.sender_id, type: 'NEW_MATCH',
-        title: '🎮 Eşleşme Sağlandı!',
+        title: 'ğŸ® EÅŸleÅŸme SaÄŸlandÄ±!',
         body: `${accepter?.name || 'Birisi'} teklifinizi kabul etti.`,
         relatedId: matchId, senderId: req.userId,
         senderName: accepter?.name, senderAvatar: accepter?.avatar_url,
@@ -3203,7 +4273,7 @@ challengesRouter.patch('/:id', async (req, res) => {
     const rejecter = await userById(req.userId);
     await pushNotification({
       userId: c.sender_id, type: 'DIRECT_CHALLENGE',
-      title: '❌ Teklif Reddedildi',
+      title: 'âŒ Teklif Reddedildi',
       body: `${rejecter?.name || 'Birisi'} teklifinizi reddetti.`,
       relatedId: c.target_id, senderId: req.userId,
     });
@@ -3214,8 +4284,8 @@ challengesRouter.patch('/:id', async (req, res) => {
 challengesRouter.delete('/:id', async (req, res) => {
   try {
     const c = await db.findById('challenges', req.params.id);
-    if (!c || c.sender_id !== req.userId) return res.status(404).json({ message: 'Teklif bulunamadı.' });
-    if (c.status !== 'PENDING') return res.status(400).json({ message: 'Yalnızca beklemedeki teklifler silinebilir.' });
+    if (!c || c.sender_id !== req.userId) return res.status(404).json({ message: 'Teklif bulunamadÄ±.' });
+    if (c.status !== 'PENDING') return res.status(400).json({ message: 'YalnÄ±zca beklemedeki teklifler silinebilir.' });
     await db.remove('challenges', c.id);
     res.json({ message: 'Teklif silindi.' });
   } catch (e) { res.status(500).json({ message: e.message }); }
@@ -3223,9 +4293,9 @@ challengesRouter.delete('/:id', async (req, res) => {
 
 app.use('/api/challenges', challengesRouter);
 
-// ══════════════════════════════════════════════════════════════════════════════
-//  POSTS (gönderi, reaksiyon, yorum)
-// ══════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+//  POSTS (gÃ¶nderi, reaksiyon, yorum)
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 const postsRouter = express.Router();
 postsRouter.use(authMiddleware);
 
@@ -3292,7 +4362,7 @@ postsRouter.get('/', async (req, res) => {
         : [],
       // Batch reactions for all posts
       client.from('post_reactions').select('post_id,user_id,type').in('post_id', postIds).then(r => r.data || []),
-      // Batch comment counts — get all comments for these posts and count in-memory
+      // Batch comment counts â€” get all comments for these posts and count in-memory
       client.from('comments').select('post_id').in('post_id', postIds).then(r => r.data || []),
     ]);
 
@@ -3340,13 +4410,13 @@ postsRouter.post('/', contentFilter('content', 'title'), async (req, res) => {
     const body = sanitize(req.body);
     const postType = body.postType === 'SOCIAL_LISTING' ? 'SOCIAL_LISTING' : 'POST';
     if (!body.content || body.content.trim().length < 1)
-      return res.status(400).json({ message: 'İçerik gerekli.' });
+      return res.status(400).json({ message: 'Ä°Ã§erik gerekli.' });
 
     const user = await userById(req.userId);
     const sport = body.sportId ? await db.findById('sports', body.sportId) : null;
 
     // NOTE: city_id and district_id have FK constraints to cities/districts tables
-    // Flutter sends numeric IDs from states.json but DB has "c1" format → FK violation
+    // Flutter sends numeric IDs from states.json but DB has "c1" format â†’ FK violation
     // Store null for IDs, rely on city_name for display
     const post = await db.insert('posts', {
       id: uuid(), user_id: req.userId, post_type: postType,
@@ -3389,7 +4459,7 @@ postsRouter.get('/user/:userId', async (req, res) => {
     }
 
     const postIds = posts.map(p => p.id);
-    const user = await userById(req.params.userId); // Single user — just one query
+    const user = await userById(req.params.userId); // Single user â€” just one query
 
     const [reactionsData, commentsData] = await Promise.all([
       client.from('post_reactions').select('post_id,user_id,type').in('post_id', postIds).then(r => r.data || []),
@@ -3421,7 +4491,7 @@ postsRouter.get('/user/:userId', async (req, res) => {
 postsRouter.get('/:id', async (req, res) => {
   try {
     const post = await db.findById('posts', req.params.id);
-    if (!post) return res.status(404).json({ message: 'Gönderi bulunamadı.' });
+    if (!post) return res.status(404).json({ message: 'GÃ¶nderi bulunamadÄ±.' });
     const author = await userById(post.user_id);
     const commentCount = await db.count('comments', { post_id: post.id });
     const rd = await enrichPostReactions(post.id, req.userId);
@@ -3439,7 +4509,7 @@ postsRouter.get('/:id', async (req, res) => {
 postsRouter.delete('/:id', async (req, res) => {
   try {
     const post = await db.findById('posts', req.params.id);
-    if (!post) return res.status(404).json({ message: 'Gönderi bulunamadı.' });
+    if (!post) return res.status(404).json({ message: 'GÃ¶nderi bulunamadÄ±.' });
     if (post.user_id !== req.userId) return res.status(403).json({ message: 'Yetkiniz yok.' });
     await db.removeWhere('post_reactions', { post_id: post.id });
     const comments = await db.query('comments', { filters: { post_id: post.id } });
@@ -3453,11 +4523,11 @@ postsRouter.delete('/:id', async (req, res) => {
 postsRouter.put('/:id', contentFilter('content'), async (req, res) => {
   try {
     const post = await db.findById('posts', req.params.id);
-    if (!post) return res.status(404).json({ message: 'Gönderi bulunamadı.' });
+    if (!post) return res.status(404).json({ message: 'GÃ¶nderi bulunamadÄ±.' });
     if (post.user_id !== req.userId) return res.status(403).json({ message: 'Yetkiniz yok.' });
     const { content } = req.body;
     if (!content || content.trim().length === 0)
-      return res.status(400).json({ message: 'İçerik boş olamaz.' });
+      return res.status(400).json({ message: 'Ä°Ã§erik boÅŸ olamaz.' });
     const updated = await db.update('posts', post.id, { content: content.trim(), updated_at: new Date().toISOString() });
     const user = await userById(post.user_id);
     const commentCount = await db.count('comments', { post_id: post.id });
@@ -3475,9 +4545,9 @@ postsRouter.put('/:id', contentFilter('content'), async (req, res) => {
 postsRouter.post('/:id/react', async (req, res) => {
   try {
     const post = await db.findById('posts', req.params.id);
-    if (!post) return res.status(404).json({ message: 'Gönderi bulunamadı.' });
+    if (!post) return res.status(404).json({ message: 'GÃ¶nderi bulunamadÄ±.' });
     const { type = 'LIKE' } = req.body;
-    if (!REACTION_TYPES.includes(type)) return res.status(400).json({ message: 'Geçersiz reaksiyon tipi.' });
+    if (!REACTION_TYPES.includes(type)) return res.status(400).json({ message: 'GeÃ§ersiz reaksiyon tipi.' });
 
     const existing = await db.findOne('post_reactions', { post_id: post.id, user_id: req.userId });
     if (existing) {
@@ -3489,8 +4559,8 @@ postsRouter.post('/:id/react', async (req, res) => {
         const reactor = await userById(req.userId);
         await pushNotification({
           userId: post.user_id, type: 'POST_REACT',
-          title: 'Gönderi Reaksiyonu',
-          body: `${reactor?.name || 'Birisi'} gönderinize tepki verdi.`,
+          title: 'GÃ¶nderi Reaksiyonu',
+          body: `${reactor?.name || 'Birisi'} gÃ¶nderinize tepki verdi.`,
           relatedId: post.id, senderId: req.userId,
           senderName: reactor?.name, senderAvatar: reactor?.avatar_url,
         });
@@ -3503,7 +4573,7 @@ postsRouter.post('/:id/react', async (req, res) => {
 postsRouter.post('/:id/like', async (req, res) => {
   try {
     const post = await db.findById('posts', req.params.id);
-    if (!post) return res.status(404).json({ message: 'Gönderi bulunamadı.' });
+    if (!post) return res.status(404).json({ message: 'GÃ¶nderi bulunamadÄ±.' });
     const existing = await db.findOne('post_reactions', { post_id: post.id, user_id: req.userId });
     if (existing) { await db.remove('post_reactions', existing.id); }
     else { await db.insert('post_reactions', { id: uuid(), post_id: post.id, user_id: req.userId, type: 'LIKE' }); }
@@ -3577,17 +4647,17 @@ postsRouter.get('/:id/comments', async (req, res) => {
 postsRouter.post('/:id/comments', contentFilter('content'), async (req, res) => {
   try {
     const post = await db.findById('posts', req.params.id);
-    if (!post) return res.status(404).json({ message: 'Gönderi bulunamadı.' });
+    if (!post) return res.status(404).json({ message: 'GÃ¶nderi bulunamadÄ±.' });
     const body = sanitize(req.body);
     if (!body.content || body.content.trim().length < 1)
-      return res.status(400).json({ message: 'Yorum içeriği gerekli.' });
+      return res.status(400).json({ message: 'Yorum iÃ§eriÄŸi gerekli.' });
     if (body.content.length > 2000)
       return res.status(400).json({ message: 'Yorum en fazla 2000 karakter olabilir.' });
 
     // Validate parentId
     if (body.parentId) {
       const parent = await db.findById('comments', body.parentId);
-      if (!parent || parent.post_id !== post.id) return res.status(404).json({ message: 'Üst yorum bulunamadı.' });
+      if (!parent || parent.post_id !== post.id) return res.status(404).json({ message: 'Ãœst yorum bulunamadÄ±.' });
     }
 
     const user = await userById(req.userId);
@@ -3604,8 +4674,8 @@ postsRouter.post('/:id/comments', contentFilter('content'), async (req, res) => 
       await pushNotification({
         userId: notifyUserId,
         type: body.parentId ? 'COMMENT_REPLY' : 'POST_COMMENT',
-        title: body.parentId ? 'Yorumunuza yanıt' : 'Yeni yorum',
-        body: `${user?.name || 'Birisi'} ${body.parentId ? 'yorumunuza yanıt verdi.' : 'gönderinize yorum yaptı.'}`,
+        title: body.parentId ? 'Yorumunuza yanÄ±t' : 'Yeni yorum',
+        body: `${user?.name || 'Birisi'} ${body.parentId ? 'yorumunuza yanÄ±t verdi.' : 'gÃ¶nderinize yorum yaptÄ±.'}`,
         relatedId: post.id, senderId: req.userId,
       });
     }
@@ -3624,7 +4694,7 @@ postsRouter.delete('/:postId/comments/:commentId', async (req, res) => {
   try {
     const comment = await db.findById('comments', req.params.commentId);
     if (!comment || comment.post_id !== req.params.postId)
-      return res.status(404).json({ message: 'Yorum bulunamadı.' });
+      return res.status(404).json({ message: 'Yorum bulunamadÄ±.' });
     const post = await db.findById('posts', req.params.postId);
     if (comment.user_id !== req.userId && post?.user_id !== req.userId)
       return res.status(403).json({ message: 'Yetkiniz yok.' });
@@ -3645,11 +4715,11 @@ postsRouter.put('/:postId/comments/:commentId', contentFilter('content'), async 
   try {
     const comment = await db.findById('comments', req.params.commentId);
     if (!comment || comment.post_id !== req.params.postId)
-      return res.status(404).json({ message: 'Yorum bulunamadı.' });
+      return res.status(404).json({ message: 'Yorum bulunamadÄ±.' });
     if (comment.user_id !== req.userId) return res.status(403).json({ message: 'Yetkiniz yok.' });
     const { content } = req.body;
     if (!content || content.trim().length === 0)
-      return res.status(400).json({ message: 'İçerik boş olamaz.' });
+      return res.status(400).json({ message: 'Ä°Ã§erik boÅŸ olamaz.' });
     const updated = await db.update('comments', comment.id, { content: content.trim(), updated_at: new Date().toISOString() });
     const user = await userById(comment.user_id);
     const likeCount = await db.count('comment_likes', { comment_id: comment.id });
@@ -3688,9 +4758,9 @@ postsRouter.get('/:postId/comments/:commentId/likes', async (req, res) => {
 
 app.use('/api/posts', postsRouter);
 
-// ══════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 //  NOTIFICATIONS
-// ══════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 app.get('/api/notifications', authMiddleware, async (req, res) => {
   try {
     const page = Math.max(1, parseInt(req.query.page) || 1);
@@ -3722,7 +4792,7 @@ app.patch('/api/notifications', authMiddleware, async (req, res) => {
     } else if (ids && Array.isArray(ids)) {
       for (const id of ids) await db.update('notifications', id, { is_read: true }).catch(() => {});
     }
-    res.json({ message: 'Okundu olarak işaretlendi.' });
+    res.json({ message: 'Okundu olarak iÅŸaretlendi.' });
   } catch (e) { res.status(500).json({ message: e.message }); }
 });
 
@@ -3805,9 +4875,9 @@ app.get('/api/badges', authMiddleware, async (req, res) => {
   }
 });
 
-// ══════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 //  SETTINGS / PRIVACY
-// ══════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 const settingsRouter = express.Router();
 settingsRouter.use(authMiddleware);
 
@@ -3879,9 +4949,9 @@ settingsRouter.get('/blocked-users', async (req, res) => {
 
 app.use('/api/settings', settingsRouter);
 
-// ══════════════════════════════════════════════════════════════════════════════
-//  HOME-BOOTSTRAP — Tek istek ile ana sayfa verisi (4→1 API call)
-// ══════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+//  HOME-BOOTSTRAP â€” Tek istek ile ana sayfa verisi (4â†’1 API call)
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 app.get('/api/home-feed', authMiddleware, async (req, res) => {
   try {
     const client = db.raw();
@@ -3995,11 +5065,11 @@ async function pruneHistoricalMatches({ keepPerUser = 3 } = {}) {
   };
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
-//  CRON JOBS — Hobby plan uyumlu bakım endpoint'leri
-// ══════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+//  CRON JOBS â€” Hobby plan uyumlu bakÄ±m endpoint'leri
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 app.get('/api/cron/cleanup-expired', async (req, res) => {
-  // Vercel Cron Authorization header kontrolü
+  // Vercel Cron Authorization header kontrolÃ¼
   const authHeader = req.headers['authorization'];
   const cronSecret = process.env.CRON_SECRET;
   if (cronSecret && authHeader !== `Bearer ${cronSecret}`) {
@@ -4010,7 +5080,7 @@ app.get('/api/cron/cleanup-expired', async (req, res) => {
     const client = db.raw();
     const now = new Date().toISOString();
 
-    // 1. Süresi dolan ilanları sil (expires_at < now)
+    // 1. SÃ¼resi dolan ilanlarÄ± sil (expires_at < now)
     const { data: expired } = await client.from('listings').select('id,user_id,title')
       .lt('expires_at', now).eq('status', 'ACTIVE');
     const expiredIds = (expired || []).map(l => l.id);
@@ -4029,34 +5099,34 @@ app.get('/api/cron/cleanup-expired', async (req, res) => {
         await pushNotification({
           userId: interest.user_id,
           type: 'RESPONSE_REJECTED',
-          title: 'Başvuru otomatik reddedildi',
+          title: 'BaÅŸvuru otomatik reddedildi',
           body: targetListing?.title
-            ? `"${targetListing.title}" ilanının süresi dolduğu için başvurunuz otomatik reddedildi.`
-            : 'İlanın süresi dolduğu için başvurunuz otomatik reddedildi.',
+            ? `"${targetListing.title}" ilanÄ±nÄ±n sÃ¼resi dolduÄŸu iÃ§in baÅŸvurunuz otomatik reddedildi.`
+            : 'Ä°lanÄ±n sÃ¼resi dolduÄŸu iÃ§in baÅŸvurunuz otomatik reddedildi.',
           relatedId: interest.listing_id,
           senderId: targetListing?.user_id || null,
         }).catch(() => {});
         autoRejectedInterests++;
       }
 
-      // İlgili interests'leri kalıcı sil
+      // Ä°lgili interests'leri kalÄ±cÄ± sil
       await client.from('interests').delete().in('listing_id', expiredIds);
       const { count } = await client.from('listings').delete({ count: 'exact' }).in('id', expiredIds);
       deletedListings = count || 0;
     }
 
-    // 2. Süresi dolmuş password reset token'larını temizle
+    // 2. SÃ¼resi dolmuÅŸ password reset token'larÄ±nÄ± temizle
     const { count: deletedTokens } = await client.from('password_reset_tokens')
       .delete({ count: 'exact' }).lt('expires_at', now);
 
-    // 3. Süresi dolmuş refresh token'larını temizle
+    // 3. SÃ¼resi dolmuÅŸ refresh token'larÄ±nÄ± temizle
     const { count: deletedRefresh } = await client.from('refresh_tokens')
       .delete({ count: 'exact' }).lt('expires_at', now);
 
-    // 4. Zamanı geçmiş ama henüz tamamlanmamış maçlar için tek seferlik hatırlatma üret
+    // 4. ZamanÄ± geÃ§miÅŸ ama henÃ¼z tamamlanmamÄ±ÅŸ maÃ§lar iÃ§in tek seferlik hatÄ±rlatma Ã¼ret
     const reminderNotifications = await generateMatchReminders({ now });
 
-    // 5. Her kullanıcı için yalnızca son 3 tarihsel maçı tut, eskileri kalıcı sil
+    // 5. Her kullanÄ±cÄ± iÃ§in yalnÄ±zca son 3 tarihsel maÃ§Ä± tut, eskileri kalÄ±cÄ± sil
     const matchPruneStats = await pruneHistoricalMatches({ keepPerUser: 3 });
 
     res.json({
@@ -4090,7 +5160,7 @@ app.get('/api/cron/match-reminders', async (req, res) => {
 });
 
 app.get('/api/cron/ecosystem-tick', async (req, res) => {
-  // Vercel Cron Authorization header kontrolü
+  // Vercel Cron Authorization header kontrolÃ¼
   const authHeader = req.headers['authorization'];
   const cronSecret = process.env.CRON_SECRET;
   if (cronSecret && authHeader !== `Bearer ${cronSecret}`) {
@@ -4098,7 +5168,7 @@ app.get('/api/cron/ecosystem-tick', async (req, res) => {
   }
 
   try {
-    // Ecosystem tick-all mantığını çağır
+    // Ecosystem tick-all mantÄ±ÄŸÄ±nÄ± Ã§aÄŸÄ±r
     const ecosystems = await db.query('bot_ecosystems', { filters: { status: 'ACTIVE' } });
     let tickedCount = 0;
     const results = [];
@@ -4115,9 +5185,9 @@ app.get('/api/cron/ecosystem-tick', async (req, res) => {
   } catch (e) { res.status(500).json({ message: e.message }); }
 });
 
-// ══════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 //  FEED, SEARCH, LEADERBOARD, RECOMMENDATIONS, ACTIVITIES, RATINGS
-// ══════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 app.get('/api/feed', authMiddleware, async (req, res) => {
   try {
     const listings = await db.query('listings', {
@@ -4138,7 +5208,7 @@ app.get('/api/recommendations', authMiddleware, async (req, res) => {
     const items = listings.map(l => ({
       id: uuid(), type: 'listing', listing: toCamel(l), createdAt: l.created_at,
     }));
-    res.json({ data: items, reason: 'Spor tercihlerinize göre' });
+    res.json({ data: items, reason: 'Spor tercihlerinize gÃ¶re' });
   } catch (e) { res.status(500).json({ message: e.message }); }
 });
 
@@ -4182,7 +5252,7 @@ app.get('/api/aktivitelerim', authMiddleware, async (req, res) => {
   try {
     const client = db.raw();
 
-    // ── 1. My listings (last 20) ──
+    // â”€â”€ 1. My listings (last 20) â”€â”€
     const myListings = await db.query('listings', {
       filters: { user_id: req.userId }, order: 'created_at', ascending: false, limit: 20,
     });
@@ -4227,7 +5297,7 @@ app.get('/api/aktivitelerim', authMiddleware, async (req, res) => {
       };
     });
 
-    // ── 2. My interests (responses to others' listings) ──
+    // â”€â”€ 2. My interests (responses to others' listings) â”€â”€
     const myInterests = await db.query('interests', { filters: { user_id: req.userId }, limit: 50 });
 
     // Batch: listings + owners + sports for my interests
@@ -4262,7 +5332,7 @@ app.get('/api/aktivitelerim', authMiddleware, async (req, res) => {
       });
     }
 
-    // ── 3. My matches (last 20 — not unlimited!) ──
+    // â”€â”€ 3. My matches (last 20 â€” not unlimited!) â”€â”€
     const [homeDirectMatchesRes, homeAcceptedListingsRes] = await Promise.all([
       client.from('matches').select('*')
         .or(`user1_id.eq.${req.userId},user2_id.eq.${req.userId}`)
@@ -4410,16 +5480,16 @@ app.post('/api/ratings', authMiddleware, async (req, res) => {
     if (!matchId || score == null) return res.status(400).json({ message: 'matchId ve score gerekli.' });
 
     const s = parseInt(score, 10);
-    if (isNaN(s) || s < 1 || s > 5) return res.status(400).json({ message: 'Puan 1-5 arasında olmalı.' });
+    if (isNaN(s) || s < 1 || s > 5) return res.status(400).json({ message: 'Puan 1-5 arasÄ±nda olmalÄ±.' });
 
     const m = await db.findById('matches', matchId);
-    if (!m) return res.status(404).json({ message: 'Maç bulunamadı.' });
-    if (m.status !== 'COMPLETED') return res.status(400).json({ message: 'Yalnızca tamamlanan maçlar değerlendirilebilir.' });
+    if (!m) return res.status(404).json({ message: 'MaÃ§ bulunamadÄ±.' });
+    if (m.status !== 'COMPLETED') return res.status(400).json({ message: 'YalnÄ±zca tamamlanan maÃ§lar deÄŸerlendirilebilir.' });
 
     const listing = await listingById(m.listing_id);
     const participantIds = await getMatchParticipantIds(m, listing);
     const isGroupMatch = isGroupMatchRecord(m, listing);
-    if (!participantIds.includes(req.userId)) return res.status(403).json({ message: 'Bu maçın katılımcısı değilsiniz.' });
+    if (!participantIds.includes(req.userId)) return res.status(403).json({ message: 'Bu maÃ§Ä±n katÄ±lÄ±mcÄ±sÄ± deÄŸilsiniz.' });
 
     let rateeId;
     if (isGroupMatch) {
@@ -4435,7 +5505,7 @@ app.post('/api/ratings', authMiddleware, async (req, res) => {
     }
 
     if (!rateeId || rateeId === req.userId) {
-      return res.status(400).json({ message: 'Geçerli bir değerlendirme hedefi bulunamadı.' });
+      return res.status(400).json({ message: 'GeÃ§erli bir deÄŸerlendirme hedefi bulunamadÄ±.' });
     }
 
     const sportId = listing?.sport_id || null;
@@ -4470,7 +5540,7 @@ app.post('/api/ratings', authMiddleware, async (req, res) => {
         await db.update('users', rateeId, { average_rating: newAvg, rating_count: allRatings.length });
       }
 
-      return res.json({ message: 'Değerlendirme güncellendi.', updated: true });
+      return res.json({ message: 'DeÄŸerlendirme gÃ¼ncellendi.', updated: true });
     }
 
     // NEW rating
@@ -4492,7 +5562,7 @@ app.post('/api/ratings', authMiddleware, async (req, res) => {
       const errMsg = String(insertErr?.message || '');
       if (isGroupMatch && /(ratings_match_id_rater_id_key|match_id.*rater_id)/i.test(errMsg)) {
         return res.status(409).json({
-          message: 'Grup maçında birden fazla partner değerlendirebilmek için ratings migrationı gerekli (005_ratings_group_unique.sql).',
+          message: 'Grup maÃ§Ä±nda birden fazla partner deÄŸerlendirebilmek iÃ§in ratings migrationÄ± gerekli (005_ratings_group_unique.sql).',
         });
       }
       throw insertErr;
@@ -4501,29 +5571,73 @@ app.post('/api/ratings', authMiddleware, async (req, res) => {
     const rater = await userById(req.userId);
     await pushNotification({
       userId: rateeId, type: 'NEW_RATING',
-      title: '⭐ Yeni Değerlendirme',
-      body: `${rater?.name || 'Birisi'} sizi değerlendirdi`,
+      title: 'â­ Yeni DeÄŸerlendirme',
+      body: `${rater?.name || 'Birisi'} sizi deÄŸerlendirdi`,
       relatedId: matchId, senderId: req.userId,
       senderName: rater?.name, senderAvatar: rater?.avatar_url,
     });
 
-    res.status(201).json({ message: 'Değerlendirme kaydedildi.' });
+    res.status(201).json({ message: 'DeÄŸerlendirme kaydedildi.' });
   } catch (e) { res.status(500).json({ message: e.message }); }
 });
 
-// ── Misc ────────────────────────────────────────────────────────────────────
+// â”€â”€ Misc â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 app.get('/api/turnuvalar', authMiddleware, (_req, res) => res.json({ data: [] }));
 app.get('/api/tournaments', authMiddleware, (_req, res) => res.json({ data: [] }));
-app.post('/api/push/token', authMiddleware, (_req, res) => res.json({ message: 'Push token kaydedildi.' }));
+
+async function handlePushToken(req, res) {
+  try {
+    const action = String(req.body?.action || 'register').trim().toLowerCase();
+    const token = normalizePushToken(req.body?.token);
+    const platform = normalizePushPlatform(req.body?.platform);
+
+    if (action !== 'register' && action !== 'unregister') {
+      return res.status(400).json({ message: 'GeÃ§ersiz action. register veya unregister olmalÄ±.' });
+    }
+
+    if (action === 'register') {
+      if (!token || token.length < 20) {
+        return res.status(400).json({ message: 'GeÃ§ersiz push token.' });
+      }
+
+      const result = await upsertPushToken({ userId: req.userId, token, platform });
+      if (!result.stored && result.reason === 'missing_table') {
+        return res.status(202).json({
+          message: 'Push token alÄ±ndÄ± fakat push_tokens tablosu henÃ¼z oluÅŸturulmamÄ±ÅŸ.',
+        });
+      }
+
+      return res.json({ message: 'Push token kaydedildi.' });
+    }
+
+    const result = await deactivatePushToken({ userId: req.userId, token });
+    if (!result.stored && result.reason === 'missing_table') {
+      return res.status(202).json({ message: 'Push token kaldÄ±rma isteÄŸi alÄ±ndÄ±.' });
+    }
+
+    return res.json({
+      message: token ? 'Push token kaldÄ±rÄ±ldÄ±.' : 'TÃ¼m push tokenlar kaldÄ±rÄ±ldÄ±.',
+    });
+  } catch (e) {
+    console.error('push token error:', e);
+    return res.status(500).json({ message: 'Push token iÅŸlenemedi.' });
+  }
+}
+
+// Main endpoint
+app.post('/api/push/token', authMiddleware, handlePushToken);
+// Backward-compatible alias for old clients posting to /api/push
+app.post('/api/push', authMiddleware, handlePushToken);
+
 app.get('/api/clubs', authMiddleware, async (_req, res) => {
   try {
     const data = await db.query('communities', { filters: { type: 'CLUB' } });
     res.json({ data: data.map(toCamel) });
   } catch { res.json({ data: [] }); }
 });
-app.post('/api/reports', authMiddleware, (_req, res) => res.json({ success: true, message: 'Şikayet alındı.' }));
+app.post('/api/reports', authMiddleware, (_req, res) => res.json({ success: true, message: 'Åikayet alÄ±ndÄ±.' }));
 
-// ── Communities (simplified) ────────────────────────────────────────────────
+// â”€â”€ Communities (simplified) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 app.get('/api/communities', authMiddleware, async (req, res) => {
   try {
     const { type, search } = req.query;
@@ -4543,11 +5657,11 @@ app.get('/api/groups', authMiddleware, async (_req, res) => {
   } catch { res.json({ groups: [] }); }
 });
 
-// ══════════════════════════════════════════════════════════════════════════════
-//  BOT ECOSYSTEM — Şehir/Ülke Canlandırma Motoru (Supabase-backed)
-// ══════════════════════════════════════════════════════════════════════════════
-// Lazy load: bot-automation modülü (LOCALIZED_NAMES 24 ülke) sadece
-// ecosystem endpoint'i ilk kez çağrıldığında yüklenir — cold start'ı hızlandırır.
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+//  BOT ECOSYSTEM â€” Åehir/Ãœlke CanlandÄ±rma Motoru (Supabase-backed)
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// Lazy load: bot-automation modÃ¼lÃ¼ (LOCALIZED_NAMES 24 Ã¼lke) sadece
+// ecosystem endpoint'i ilk kez Ã§aÄŸrÄ±ldÄ±ÄŸÄ±nda yÃ¼klenir â€” cold start'Ä± hÄ±zlandÄ±rÄ±r.
 let _botAutomationCache = undefined;
 function getBotAutomation() {
   if (_botAutomationCache !== undefined) return _botAutomationCache;
@@ -4626,19 +5740,19 @@ ecosystemRouter.use(authMiddleware);
 // Admin guard
 ecosystemRouter.use(async (req, res, next) => {
   const user = await userById(req.userId);
-  if (!user || !user.is_admin) return res.status(403).json({ message: 'Yetkisiz: Admin değilsiniz.' });
+  if (!user || !user.is_admin) return res.status(403).json({ message: 'Yetkisiz: Admin deÄŸilsiniz.' });
   next();
 });
 
 /**
- * GET /api/admin/ecosystems — Tüm aktif ekosistemler
+ * GET /api/admin/ecosystems â€” TÃ¼m aktif ekosistemler
  */
 ecosystemRouter.get('/', async (req, res) => {
   try {
     const ecosystems = await db.query('bot_ecosystems', { order: 'created_at', ascending: false });
     if (ecosystems.length === 0) return res.json({ data: [] });
 
-    // Batch: tüm bot kullanıcılarını tek sorguda çek, city_id + city_name fallback ile eşleştir
+    // Batch: tÃ¼m bot kullanÄ±cÄ±larÄ±nÄ± tek sorguda Ã§ek, city_id + city_name fallback ile eÅŸleÅŸtir
     const allBotsRes = await db.raw().from('users').select('id, city_id, city, country_code').eq('is_bot', true);
     const allBots = allBotsRes.data || [];
     const allActiveListingsRes = await db.raw().from('listings').select('user_id').eq('status', 'ACTIVE');
@@ -4665,17 +5779,17 @@ ecosystemRouter.get('/', async (req, res) => {
 });
 
 /**
- * POST /api/admin/ecosystems — Yeni ekosistem oluştur (Şehir/Ülke Canlandır)
+ * POST /api/admin/ecosystems â€” Yeni ekosistem oluÅŸtur (Åehir/Ãœlke CanlandÄ±r)
  *
  * Body:
  *   scope: 'CITY' | 'COUNTRY' | 'WORLD'
  *   countryCode: 'TR' (required for CITY/COUNTRY)
  *   cityId: 'state_123' (required for CITY)
- *   cityName: 'İstanbul' (required for CITY)
+ *   cityName: 'Ä°stanbul' (required for CITY)
  *   sportIds: ['sport_yoga', 'sport_pilates'] (array of sport IDs)
  *   listingType: 'PARTNER' | 'RIVAL' | 'BOTH'
- *   botsPerCity: 4-20 (default 6) — must be even
- *   maxParticipants: 3-6 (default 4) — group listing size
+ *   botsPerCity: 4-20 (default 6) â€” must be even
+ *   maxParticipants: 3-6 (default 4) â€” group listing size
  *   hourlyApplications: 1-5 (default 2)
  */
 ecosystemRouter.post('/', async (req, res) => {
@@ -4697,10 +5811,10 @@ ecosystemRouter.post('/', async (req, res) => {
     } = req.body;
 
     if (scope === 'CITY' && (!cityId || !cityName)) {
-      return res.status(400).json({ message: 'Şehir seçilmeli (cityId, cityName).' });
+      return res.status(400).json({ message: 'Åehir seÃ§ilmeli (cityId, cityName).' });
     }
     if ((scope === 'CITY' || scope === 'COUNTRY') && !countryCode) {
-      return res.status(400).json({ message: 'Ülke kodu gerekli (countryCode).' });
+      return res.status(400).json({ message: 'Ãœlke kodu gerekli (countryCode).' });
     }
 
     // botsPerGroup * groupsPerCity = total bots per city (if botsPerGroup sent from Flutter)
@@ -4747,7 +5861,7 @@ ecosystemRouter.post('/', async (req, res) => {
       }
     }
 
-    if (cities.length === 0) return res.status(400).json({ message: 'Şehir verisi bulunamadı.' });
+    if (cities.length === 0) return res.status(400).json({ message: 'Åehir verisi bulunamadÄ±.' });
 
     // Get sports
     const allSports = await db.query('sports');
@@ -4792,11 +5906,11 @@ ecosystemRouter.post('/', async (req, res) => {
       createdEcos.push(createdEco);
       ecosystemIds.push(ecoId);
 
-      // Create bots (mostly female ~70%) — batch insert (tek Supabase çağrısı)
+      // Create bots (mostly female ~70%) â€” batch insert (tek Supabase Ã§aÄŸrÄ±sÄ±)
       const femalePct = 0.7;
       const femaleCount = Math.round(perCity * femalePct);
       const botRows = [];
-      const botMeta = []; // id/name/gender/sportId bilgisi listings için
+      const botMeta = []; // id/name/gender/sportId bilgisi listings iÃ§in
 
       const nowMs = Date.now();
       for (let i = 0; i < perCity; i++) {
@@ -4853,7 +5967,7 @@ ecosystemRouter.post('/', async (req, res) => {
         botMeta.push({ id: botId, name: bName, gender, sportId: sport.id, sportName: sport.name });
       }
 
-      // Tüm botları tek bir Supabase INSERT çağrısıyla ekle
+      // TÃ¼m botlarÄ± tek bir Supabase INSERT Ã§aÄŸrÄ±sÄ±yla ekle
       let botsCreated = [];
       try {
         await db.insertMany('users', botRows);
@@ -4861,7 +5975,7 @@ ecosystemRouter.post('/', async (req, res) => {
         totalBots += botsCreated.length;
       } catch (err) {
         console.error(`Bot batch insert error (city: ${city.name}):`, err.message);
-        // Kısmi başarısızlık: bireysel fallback
+        // KÄ±smi baÅŸarÄ±sÄ±zlÄ±k: bireysel fallback
         for (let i = 0; i < botRows.length; i++) {
           try {
             await db.insert('users', botRows[i]);
@@ -4873,7 +5987,7 @@ ecosystemRouter.post('/', async (req, res) => {
         }
       }
 
-      // Create initial group listings (female bots create listings) — batch insert
+      // Create initial group listings (female bots create listings) â€” batch insert
       const femaleBots = botsCreated.filter(b => b.gender === 'FEMALE');
       const listingRows = [];
       for (const bot of femaleBots) {
@@ -4912,7 +6026,7 @@ ecosystemRouter.post('/', async (req, res) => {
         });
       }
 
-      // Tüm ilanları tek bir Supabase INSERT çağrısıyla ekle
+      // TÃ¼m ilanlarÄ± tek bir Supabase INSERT Ã§aÄŸrÄ±sÄ±yla ekle
       let cityListingsCreated = 0;
       if (listingRows.length > 0) {
         try {
@@ -4921,7 +6035,7 @@ ecosystemRouter.post('/', async (req, res) => {
           totalListings += cityListingsCreated;
         } catch (err) {
           console.error(`Listing batch insert error (city: ${city.name}):`, err.message);
-          // Kısmi başarısızlık: bireysel fallback
+          // KÄ±smi baÅŸarÄ±sÄ±zlÄ±k: bireysel fallback
           for (const row of listingRows) {
             try {
               await db.insert('listings', row);
@@ -4957,7 +6071,7 @@ ecosystemRouter.post('/', async (req, res) => {
 
     res.json({
       success: true,
-      message: `${cities.length} şehirde ${totalBots} bot + ${totalListings} ilan oluşturuldu.`,
+      message: `${cities.length} ÅŸehirde ${totalBots} bot + ${totalListings} ilan oluÅŸturuldu.`,
       data: {
         ecosystemIds,
         citiesAnimated: cities.length,
@@ -4974,14 +6088,14 @@ ecosystemRouter.post('/', async (req, res) => {
 });
 
 /**
- * POST /api/admin/ecosystems/:id/tick — Saatlik ekosistem güncellemesi
- * Botlar birbirlerinin ilanlarına başvurur, kabul eder, eşleşir, puanlar
+ * POST /api/admin/ecosystems/:id/tick â€” Saatlik ekosistem gÃ¼ncellemesi
+ * Botlar birbirlerinin ilanlarÄ±na baÅŸvurur, kabul eder, eÅŸleÅŸir, puanlar
  */
 ecosystemRouter.post('/:id/tick', async (req, res) => {
   try {
     const eco = await db.findById('bot_ecosystems', req.params.id);
-    if (!eco) return res.status(404).json({ message: 'Ekosistem bulunamadı.' });
-    if (eco.status !== 'ACTIVE') return res.status(400).json({ message: 'Ekosistem aktif değil.' });
+    if (!eco) return res.status(404).json({ message: 'Ekosistem bulunamadÄ±.' });
+    if (eco.status !== 'ACTIVE') return res.status(400).json({ message: 'Ekosistem aktif deÄŸil.' });
 
     const result = await runEcosystemTick(eco);
     res.json({ success: true, data: result });
@@ -4992,7 +6106,7 @@ ecosystemRouter.post('/:id/tick', async (req, res) => {
 });
 
 /**
- * POST /api/admin/ecosystems/tick-all — Tüm aktif ekosistemlerin saatlik güncellemesi
+ * POST /api/admin/ecosystems/tick-all â€” TÃ¼m aktif ekosistemlerin saatlik gÃ¼ncellemesi
  */
 ecosystemRouter.post('/tick-all', async (req, res) => {
   try {
@@ -5011,12 +6125,12 @@ ecosystemRouter.post('/tick-all', async (req, res) => {
 });
 
 /**
- * DELETE /api/admin/ecosystems/:id — Ekosistem sil (botları ve verilerini temizle)
+ * DELETE /api/admin/ecosystems/:id â€” Ekosistem sil (botlarÄ± ve verilerini temizle)
  */
 ecosystemRouter.delete('/:id', async (req, res) => {
   try {
     const eco = await db.findById('bot_ecosystems', req.params.id);
-    if (!eco) return res.status(404).json({ message: 'Ekosistem bulunamadı.' });
+    if (!eco) return res.status(404).json({ message: 'Ekosistem bulunamadÄ±.' });
 
     // Find all bots in this ecosystem (city_id/city_name fallback)
     const bots = await getBotsForEcosystem(eco);
@@ -5050,12 +6164,12 @@ ecosystemRouter.delete('/:id', async (req, res) => {
 });
 
 /**
- * PATCH /api/admin/ecosystems/:id — Ekosistem güncelle (duraklatma, parametre değiştirme)
+ * PATCH /api/admin/ecosystems/:id â€” Ekosistem gÃ¼ncelle (duraklatma, parametre deÄŸiÅŸtirme)
  */
 ecosystemRouter.patch('/:id', async (req, res) => {
   try {
     const eco = await db.findById('bot_ecosystems', req.params.id);
-    if (!eco) return res.status(404).json({ message: 'Ekosistem bulunamadı.' });
+    if (!eco) return res.status(404).json({ message: 'Ekosistem bulunamadÄ±.' });
 
     const { status, hourlyApplications, maxParticipants, sportIds, listingType } = req.body;
     const changes = {};
@@ -5077,12 +6191,12 @@ ecosystemRouter.patch('/:id', async (req, res) => {
 
 /**
  * POST /api/admin/ecosystems/:id/toggle-bots-privacy
- * Botların profillerini public/private yap
+ * BotlarÄ±n profillerini public/private yap
  */
 ecosystemRouter.post('/:id/toggle-bots-privacy', async (req, res) => {
   try {
     const eco = await db.findById('bot_ecosystems', req.params.id);
-    if (!eco) return res.status(404).json({ message: 'Ekosistem bulunamadı.' });
+    if (!eco) return res.status(404).json({ message: 'Ekosistem bulunamadÄ±.' });
 
     const { isPrivate } = req.body;
     const bots = await getBotsForEcosystem(eco);
@@ -5091,11 +6205,11 @@ ecosystemRouter.post('/:id/toggle-bots-privacy', async (req, res) => {
       await db.update('users', bot.id, { is_private: !!isPrivate });
       updated++;
     }
-    res.json({ message: `${updated} bot profili ${isPrivate ? 'gizli' : 'herkese açık'} yapıldı.` });
+    res.json({ message: `${updated} bot profili ${isPrivate ? 'gizli' : 'herkese aÃ§Ä±k'} yapÄ±ldÄ±.` });
   } catch (e) { res.status(500).json({ message: e.message }); }
 });
 
-// ── Ecosystem Tick Engine ───────────────────────────────────────────────────
+// â”€â”€ Ecosystem Tick Engine â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 async function runEcosystemTick(eco) {
   const stats = { newApplications: 0, newAcceptances: 0, newMatches: 0, newRatings: 0, newListings: 0, newPosts: 0, newReactions: 0, newComments: 0 };
   const persistEcoCityId = await resolvePersistCityId(eco.city_id);
@@ -5198,7 +6312,7 @@ async function runEcosystemTick(eco) {
   const botAutomation = getBotAutomation();
   const locale = botAutomation ? botAutomation.mapCountryCodeToLocale(eco.country_code || 'EN') : 'en';
 
-  // 1. APPLICATIONS — Bots apply to active listings
+  // 1. APPLICATIONS â€” Bots apply to active listings
   const client = db.raw();
   const { data: activeListings } = await client.from('listings').select('*')
     .eq('status', 'ACTIVE')
@@ -5222,7 +6336,7 @@ async function runEcosystemTick(eco) {
         user_id: bot.id,
         user_name: bot.name,
         user_avatar: bot.avatar_url,
-        message: botAutomation ? botAutomation.generateResponseMsg(bot.name, locale) : `${bot.name} katılmak istiyor!`,
+        message: botAutomation ? botAutomation.generateResponseMsg(bot.name, locale) : `${bot.name} katÄ±lmak istiyor!`,
         status: 'PENDING',
       };
       try {
@@ -5233,7 +6347,7 @@ async function runEcosystemTick(eco) {
     }
   }
 
-  // 2. ACCEPTANCES — Listing owners accept pending applications
+  // 2. ACCEPTANCES â€” Listing owners accept pending applications
   const { data: pendingInterests } = await client.from('interests').select('*')
     .in('listing_id', (activeListings || []).map(l => l.id))
     .eq('status', 'PENDING');
@@ -5364,7 +6478,7 @@ async function runEcosystemTick(eco) {
     }
   }
 
-  // 3. RATINGS — Complete scheduled matches and rate each other
+  // 3. RATINGS â€” Complete scheduled matches and rate each other
   const botMatchFilters = botIds
     .flatMap(id => [`user1_id.eq.${id}`, `user2_id.eq.${id}`])
     .join(',');
@@ -5399,7 +6513,7 @@ async function runEcosystemTick(eco) {
         await db.update('ratings', existingRating.id, { score: newScore, match_id: m.id });
       } else {
         const score = 4 + Math.floor(Math.random() * 2); // 4-5
-        const comments = ['Harika partner! 🎾', 'Çok keyifli maçtı!', 'Tekrar oynamak isterim', 'Great game!', 'Super Spiel!', 'Отличная игра!'];
+        const comments = ['Harika partner! ğŸ¾', 'Ã‡ok keyifli maÃ§tÄ±!', 'Tekrar oynamak isterim', 'Great game!', 'Super Spiel!', 'ĞÑ‚Ğ»Ğ¸Ñ‡Ğ½Ğ°Ñ Ğ¸Ğ³Ñ€Ğ°!'];
         await db.insert('ratings', {
           id: uuid(),
           match_id: m.id,
@@ -5423,7 +6537,7 @@ async function runEcosystemTick(eco) {
     }
   }
 
-  // 4. NEW LISTINGS — Create new listings to replace matched ones
+  // 4. NEW LISTINGS â€” Create new listings to replace matched ones
   const femaleBots = bots.filter(b => b.gender === 'FEMALE');
   const sports = eco.sport_ids ? await Promise.all(eco.sport_ids.map(id => db.findById('sports', id))) : [];
   const validSports = sports.filter(Boolean);
@@ -5483,7 +6597,7 @@ async function runEcosystemTick(eco) {
     }
   }
 
-  // 5. SOCIAL POSTS — Bots create social posts (SOCIAL_LISTING) in their own language
+  // 5. SOCIAL POSTS â€” Bots create social posts (SOCIAL_LISTING) in their own language
   // ~60% of bots post per tick if they haven't posted in the last 24 hours
   if (botAutomation) {
     const oneDayAgo = new Date(Date.now() - 24 * 3600000).toISOString();
@@ -5550,7 +6664,7 @@ async function runEcosystemTick(eco) {
     }
   }
 
-  // 6. REACTIONS — Bots react (LIKE/FIRE/CLAP) to recent posts from ANY ecosystem
+  // 6. REACTIONS â€” Bots react (LIKE/FIRE/CLAP) to recent posts from ANY ecosystem
   // Fetches last 30 global posts so bots from different countries can interact
   if (botAutomation) {
     const BOT_REACTION_TYPES = ['LIKE', 'FIRE', 'CLAP', 'LOVE', 'STRONG'];
@@ -5597,7 +6711,7 @@ async function runEcosystemTick(eco) {
     }
   }
 
-  // 7. COMMENTS — Bots comment on recent global posts (40% chance per reaction)
+  // 7. COMMENTS â€” Bots comment on recent global posts (40% chance per reaction)
   if (botAutomation) {
     const twoDaysAgoC = new Date(Date.now() - 48 * 3600000).toISOString();
     const { data: postsToComment } = await client.from('posts')
@@ -5715,12 +6829,12 @@ async function runEcosystemTick(eco) {
   return stats;
 }
 
-// ── Admin Stats (Supabase-backed — replaces broken in-memory admin.js) ──────
+// â”€â”€ Admin Stats (Supabase-backed â€” replaces broken in-memory admin.js) â”€â”€â”€â”€â”€â”€
 const adminStatsRouter = express.Router();
 adminStatsRouter.use(authMiddleware);
 adminStatsRouter.use(async (req, res, next) => {
   const user = await userById(req.userId);
-  if (!user || !user.is_admin) return res.status(403).json({ message: 'Yetkisiz: Admin değilsiniz.' });
+  if (!user || !user.is_admin) return res.status(403).json({ message: 'Yetkisiz: Admin deÄŸilsiniz.' });
   next();
 });
 
@@ -5781,7 +6895,7 @@ adminStatsRouter.get('/reports', async (_req, res) => {
   } catch (e) { res.status(500).json({ message: e.message }); }
 });
 
-// ── Admin: PATCH /users/:id (update user) ──
+// â”€â”€ Admin: PATCH /users/:id (update user) â”€â”€
 adminStatsRouter.patch('/users/:id', async (req, res) => {
   try {
     const body = sanitize(req.body);
@@ -5796,21 +6910,21 @@ adminStatsRouter.patch('/users/:id', async (req, res) => {
   } catch (e) { res.status(500).json({ message: e.message }); }
 });
 
-// ── Admin: DELETE /users/:id ──
+// â”€â”€ Admin: DELETE /users/:id â”€â”€
 adminStatsRouter.delete('/users/:id', async (req, res) => {
   try {
     await db.remove('users', req.params.id);
-    res.json({ message: 'Kullanıcı silindi.' });
+    res.json({ message: 'KullanÄ±cÄ± silindi.' });
   } catch (e) { res.status(500).json({ message: e.message }); }
 });
 
-// ── Admin: PATCH /reports/:id (resolve report) ──
+// â”€â”€ Admin: PATCH /reports/:id (resolve report) â”€â”€
 adminStatsRouter.patch('/reports/:id', async (req, res) => {
   try {
     const body = sanitize(req.body);
     const action = (body.action || body.status || 'RESOLVED').toUpperCase();
     const report = await db.findById('reports', req.params.id);
-    if (!report) return res.status(404).json({ message: 'Rapor bulunamadı.' });
+    if (!report) return res.status(404).json({ message: 'Rapor bulunamadÄ±.' });
 
     // Ban user if action is BAN
     if (action === 'BAN' && report.target_id) {
@@ -5829,7 +6943,7 @@ adminStatsRouter.patch('/reports/:id', async (req, res) => {
   } catch (e) { res.status(500).json({ message: e.message }); }
 });
 
-// ── Admin: GET /posts (list all posts) ──
+// â”€â”€ Admin: GET /posts (list all posts) â”€â”€
 adminStatsRouter.get('/posts', async (req, res) => {
   try {
     const { page = 1, limit = 20 } = req.query;
@@ -5840,15 +6954,15 @@ adminStatsRouter.get('/posts', async (req, res) => {
   } catch (e) { res.status(500).json({ message: e.message }); }
 });
 
-// ── Admin: DELETE /posts/:id ──
+// â”€â”€ Admin: DELETE /posts/:id â”€â”€
 adminStatsRouter.delete('/posts/:id', async (req, res) => {
   try {
     await db.remove('posts', req.params.id);
-    res.json({ message: 'Gönderi silindi.' });
+    res.json({ message: 'GÃ¶nderi silindi.' });
   } catch (e) { res.status(500).json({ message: e.message }); }
 });
 
-// ── Admin: GET /listings (list all listings) ──
+// â”€â”€ Admin: GET /listings (list all listings) â”€â”€
 adminStatsRouter.get('/listings', async (req, res) => {
   try {
     const { page = 1, limit = 20 } = req.query;
@@ -5859,7 +6973,7 @@ adminStatsRouter.get('/listings', async (req, res) => {
   } catch (e) { res.status(500).json({ message: e.message }); }
 });
 
-// ── Admin: DELETE /listings/bulk ──
+// â”€â”€ Admin: DELETE /listings/bulk â”€â”€
 adminStatsRouter.delete('/listings/bulk', async (req, res) => {
   try {
     const body = sanitize(req.body);
@@ -5869,15 +6983,15 @@ adminStatsRouter.delete('/listings/bulk', async (req, res) => {
   } catch (e) { res.status(500).json({ message: e.message }); }
 });
 
-// ── Admin: DELETE /listings/:id (individual listing delete) ──
+// â”€â”€ Admin: DELETE /listings/:id (individual listing delete) â”€â”€
 adminStatsRouter.delete('/listings/:id', async (req, res) => {
   try {
     await db.remove('listings', req.params.id);
-    res.json({ message: 'İlan silindi.' });
+    res.json({ message: 'Ä°lan silindi.' });
   } catch (e) { res.status(500).json({ message: e.message }); }
 });
 
-// ── Admin: Bots CRUD ──
+// â”€â”€ Admin: Bots CRUD â”€â”€
 adminStatsRouter.get('/bots', async (_req, res) => {
   try {
     const bots = await db.query('users', { filter: { is_bot: true }, order: 'created_at', ascending: false, limit: 100 });
@@ -5917,12 +7031,12 @@ adminStatsRouter.delete('/bots/:id', async (req, res) => {
   } catch (e) { res.status(500).json({ message: e.message }); }
 });
 
-// ── Admin: Countries/Cities/Districts ──
+// â”€â”€ Admin: Countries/Cities/Districts â”€â”€
 adminStatsRouter.get('/countries', async (_req, res) => {
   try {
     const cities = await db.query('cities', { limit: 100 });
     // Group by a pseudo-country (Turkey)
-    res.json({ data: [{ id: 'TR', name: 'Türkiye', cities: cities.map(toCamel) }] });
+    res.json({ data: [{ id: 'TR', name: 'TÃ¼rkiye', cities: cities.map(toCamel) }] });
   } catch (e) { res.status(500).json({ message: e.message }); }
 });
 
@@ -5942,7 +7056,7 @@ adminStatsRouter.post('/countries/:id/cities/:cityId/districts', async (req, res
   } catch (e) { res.status(500).json({ message: e.message }); }
 });
 
-// ── Admin: Bot Tasks ──
+// â”€â”€ Admin: Bot Tasks â”€â”€
 adminStatsRouter.get('/bot-tasks', async (_req, res) => {
   try {
     const tasks = await db.query('bot_tasks', { order: 'created_at', ascending: false, limit: 50 }).catch(() => []);
@@ -5953,7 +7067,7 @@ adminStatsRouter.get('/bot-tasks', async (_req, res) => {
 adminStatsRouter.post('/bot-tasks/:id/execute', async (req, res) => {
   try {
     const updated = await db.update('bot_tasks', req.params.id, { status: 'EXECUTED' }).catch(() => null);
-    res.json({ data: updated ? toCamel(updated) : null, message: 'Görev yürütüldü.' });
+    res.json({ data: updated ? toCamel(updated) : null, message: 'GÃ¶rev yÃ¼rÃ¼tÃ¼ldÃ¼.' });
   } catch (e) { res.status(500).json({ message: e.message }); }
 });
 
@@ -5962,11 +7076,11 @@ adminStatsRouter.delete('/bot-tasks', async (_req, res) => {
     // Bulk delete all completed bot tasks
     const tasks = await db.query('bot_tasks', { filter: { status: 'EXECUTED' }, limit: 200 }).catch(() => []);
     for (const t of tasks) await db.remove('bot_tasks', t.id).catch(() => {});
-    res.json({ message: `${tasks.length} görev silindi.` });
+    res.json({ message: `${tasks.length} gÃ¶rev silindi.` });
   } catch (e) { res.json({ message: 'Temizlendi.' }); }
 });
 
-// ── Admin: Challenges ──
+// â”€â”€ Admin: Challenges â”€â”€
 adminStatsRouter.get('/challenges', async (_req, res) => {
   try {
     const challenges = await db.query('challenges', { order: 'created_at', ascending: false, limit: 50 });
@@ -5981,7 +7095,7 @@ adminStatsRouter.delete('/challenges/:id', async (req, res) => {
   } catch (e) { res.status(500).json({ message: e.message }); }
 });
 
-// ── Admin: Matches ──
+// â”€â”€ Admin: Matches â”€â”€
 adminStatsRouter.get('/matches', async (_req, res) => {
   try {
     const matches = await db.query('matches', { order: 'created_at', ascending: false, limit: 50 });
@@ -5992,7 +7106,7 @@ adminStatsRouter.get('/matches', async (_req, res) => {
 adminStatsRouter.delete('/matches/:id', async (req, res) => {
   try {
     await db.remove('matches', req.params.id);
-    res.json({ message: 'Eşleşme silindi.' });
+    res.json({ message: 'EÅŸleÅŸme silindi.' });
   } catch (e) { res.status(500).json({ message: e.message }); }
 });
 
@@ -6000,13 +7114,13 @@ adminStatsRouter.delete('/matches/:id', async (req, res) => {
 app.use('/api/admin/ecosystems', ecosystemRouter);
 app.use('/api/admin', adminStatsRouter);
 
-// Legacy admin routes (in-memory store — only works in Docker/dev)
+// Legacy admin routes (in-memory store â€” only works in Docker/dev)
 try {
   const adminRouter = require('../routes/admin');
   app.use('/api/admin', authMiddleware, adminRouter);
 } catch { /* admin routes not available */ }
 
-// ── Stress Monitor (auth required) ──────────────────────────────────────────
+// â”€â”€ Stress Monitor (auth required) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 app.get('/api/stress-monitor', authMiddleware, async (req, res) => {
   const user = await userById(req.userId);
   if (!user || !user.is_admin) return res.status(403).json({ message: 'Admin only.' });
@@ -6021,7 +7135,7 @@ app.get('/api/stress-monitor', authMiddleware, async (req, res) => {
   });
 });
 
-// ── DB Migration (admin-only, idempotent) ───────────────────────────────────
+// â”€â”€ DB Migration (admin-only, idempotent) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 app.post('/api/admin/migrate', authMiddleware, async (req, res) => {
   const user = await userById(req.userId);
   if (!user || !user.is_admin) return res.status(403).json({ message: 'Admin only.' });
@@ -6033,7 +7147,7 @@ app.post('/api/admin/migrate', authMiddleware, async (req, res) => {
   try {
     const { error: checkErr } = await client.from('bot_ecosystems').select('id').limit(1);
     if (checkErr && checkErr.message.includes('could not find')) {
-      // Table doesn't exist — create via raw SQL through a temp function
+      // Table doesn't exist â€” create via raw SQL through a temp function
       results.push({ table: 'bot_ecosystems', status: 'NEEDS_MANUAL_CREATE', note: 'Run SQL in Supabase Dashboard' });
     } else {
       results.push({ table: 'bot_ecosystems', status: 'EXISTS' });
@@ -6049,6 +7163,26 @@ app.post('/api/admin/migrate', authMiddleware, async (req, res) => {
       results.push({ table: 'password_reset_tokens', status: 'EXISTS' });
     }
   } catch (e) { results.push({ table: 'password_reset_tokens', status: 'ERROR', error: e.message }); }
+
+  // 3. push_tokens table
+  try {
+    const { error: checkErr } = await client.from('push_tokens').select('id').limit(1);
+    if (checkErr && checkErr.message.includes('could not find')) {
+      results.push({ table: 'push_tokens', status: 'NEEDS_MANUAL_CREATE', note: 'Run SQL in Supabase Dashboard' });
+    } else {
+      results.push({ table: 'push_tokens', status: 'EXISTS' });
+    }
+  } catch (e) { results.push({ table: 'push_tokens', status: 'ERROR', error: e.message }); }
+
+  // 4. auth_audit_logs table
+  try {
+    const { error: checkErr } = await client.from('auth_audit_logs').select('id').limit(1);
+    if (checkErr && checkErr.message.includes('could not find')) {
+      results.push({ table: 'auth_audit_logs', status: 'NEEDS_MANUAL_CREATE', note: 'Run SQL in Supabase Dashboard' });
+    } else {
+      results.push({ table: 'auth_audit_logs', status: 'EXISTS' });
+    }
+  } catch (e) { results.push({ table: 'auth_audit_logs', status: 'ERROR', error: e.message }); }
 
   res.json({ results, sql: `
 -- Run this SQL in Supabase Dashboard > SQL Editor:
@@ -6081,14 +7215,45 @@ CREATE TABLE IF NOT EXISTS password_reset_tokens (
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS push_tokens (
+  id TEXT PRIMARY KEY DEFAULT ('pt_' || uuid_generate_v4()::TEXT),
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  token TEXT NOT NULL,
+  platform TEXT NOT NULL DEFAULT 'android',
+  is_active BOOLEAN DEFAULT true,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW(),
+  last_seen_at TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE(user_id, token)
+);
+
+CREATE TABLE IF NOT EXISTS auth_audit_logs (
+  id TEXT PRIMARY KEY DEFAULT ('audit_' || uuid_generate_v4()::TEXT),
+  event_type TEXT NOT NULL,
+  user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+  email TEXT,
+  ip_address TEXT,
+  user_agent TEXT,
+  success BOOLEAN DEFAULT true,
+  reason TEXT,
+  metadata JSONB DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
 CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_token ON password_reset_tokens(token);
 CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_user_id ON password_reset_tokens(user_id);
+CREATE INDEX IF NOT EXISTS idx_push_tokens_user_id ON push_tokens(user_id);
+CREATE INDEX IF NOT EXISTS idx_push_tokens_active ON push_tokens(user_id, is_active);
+CREATE INDEX IF NOT EXISTS idx_auth_audit_logs_created_at ON auth_audit_logs(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_auth_audit_logs_event_type ON auth_audit_logs(event_type);
+CREATE INDEX IF NOT EXISTS idx_auth_audit_logs_email ON auth_audit_logs(email);
 CREATE INDEX IF NOT EXISTS idx_listings_expires_at ON listings(expires_at) WHERE status = 'ACTIVE';
 CREATE INDEX IF NOT EXISTS idx_bot_ecosystems_active ON bot_ecosystems(is_active) WHERE is_active = true;
   ` });
 });
 
-// ── 404 ─────────────────────────────────────────────────────────────────────
-app.use((req, res) => res.status(404).json({ message: `Endpoint bulunamadı: ${req.method} ${req.path}` }));
+// â”€â”€ 404 â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+app.use((req, res) => res.status(404).json({ message: `Endpoint bulunamadÄ±: ${req.method} ${req.path}` }));
 
 module.exports = app;
+
