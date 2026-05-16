@@ -1375,9 +1375,11 @@ async function resolveUserPreferredPushLocale(userId, fallback = 'tr') {
   const normalizedFallback = normalizePushLocale(fallback, 'tr') || 'tr';
 
   try {
-    const tokenResult = await listActivePushTokens(userId, 1);
-    const tokenLocale = normalizePushLocale(tokenResult.tokens?.[0]?.locale, '');
-    if (tokenLocale) return tokenLocale;
+    const tokenResult = await listActivePushTokens(userId, 10);
+    for (const token of (tokenResult.tokens || [])) {
+      const tokenLocale = normalizePushLocale(token?.locale, '');
+      if (tokenLocale) return tokenLocale;
+    }
   } catch {
     // ignore and continue fallback chain
   }
