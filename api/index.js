@@ -818,7 +818,7 @@ const DIRECT_CHALLENGE_COPY = Object.freeze({
   tr: {
     rivalTitle: '\u2694\uFE0F Rakip Teklifi!',
     partnerTitle: '\uD83E\uDD1D Partner Teklifi!',
-    bodyTemplate: '{sender} sana {sport} teklifi gonderdi.',
+    bodyTemplate: '{sender} sana {sport} teklifi g\u00F6nderdi.',
     senderFallback: 'Birisi',
     sportFallback: 'spor',
   },
