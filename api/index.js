@@ -1412,6 +1412,86 @@ function buildDirectChallengePushCopy({ locale = 'tr', challengeType = 'RIVAL', 
   };
 }
 
+async function loadDirectChallengePushContext(notif) {
+  if (String(notif?.type || '').toUpperCase() !== 'DIRECT_CHALLENGE') return null;
+
+  const challengeId = maybeString(notif?.related_id, 120);
+  if (!challengeId) return null;
+
+  const context = {
+    challengeType: 'RIVAL',
+    senderName: maybeString(notif?.sender_name, 80) || '',
+    sportId: '',
+    sportName: '',
+  };
+
+  try {
+    const challenge = await db.findById('challenges', challengeId);
+    if (!challenge) return context;
+
+    context.challengeType = challenge.challenge_type || 'RIVAL';
+    context.sportId = challenge.sport_id || '';
+
+    if (!context.senderName && challenge.sender_id) {
+      const sender = await userById(challenge.sender_id);
+      context.senderName = maybeString(sender?.name, 80) || '';
+    }
+
+    if (context.sportId) {
+      const sport = await db.findById('sports', context.sportId);
+      context.sportName = maybeString(sport?.name, 80) || '';
+    }
+
+    return context;
+  } catch (error) {
+    logPushTelemetry('send_direct_challenge_context_error', {
+      notificationId: notif?.id || null,
+      userId: notif?.user_id || null,
+      error: clipForLogs(error?.message || error),
+    });
+    return context;
+  }
+}
+
+function buildPerTokenPushContent({
+  notif,
+  tokenLocale = '',
+  fallbackLocale = 'tr',
+  directChallengeContext = null,
+}) {
+  const resolvedLocale =
+    normalizePushLocale(tokenLocale, fallbackLocale)
+    || normalizePushLocale(fallbackLocale, 'tr')
+    || 'tr';
+
+  if (!directChallengeContext) {
+    return {
+      title: notif.title,
+      body: notif.body,
+      locale: resolvedLocale,
+    };
+  }
+
+  const localizedSportName = localizeSportNameForPush({
+    sportId: directChallengeContext.sportId || '',
+    rawName: directChallengeContext.sportName || 'sport',
+    locale: resolvedLocale,
+  });
+
+  const copy = buildDirectChallengePushCopy({
+    locale: resolvedLocale,
+    challengeType: directChallengeContext.challengeType || 'RIVAL',
+    senderName: directChallengeContext.senderName || '',
+    sportName: localizedSportName,
+  });
+
+  return {
+    title: copy.title,
+    body: copy.body,
+    locale: resolvedLocale,
+  };
+}
+
 async function sendFcmLegacyMessage({ token, title, body, data }) {
   if (typeof fetch !== 'function') {
     return { ok: false, code: 'fetch_unavailable', message: 'Global fetch is not available.' };
@@ -1614,6 +1694,22 @@ async function sendPushForNotification(notif) {
     return { sent: 0, attempted: 0, reason: tokenResult.reason || 'no_tokens' };
   }
 
+  const isDirectChallenge = String(notif.type || '').toUpperCase() === 'DIRECT_CHALLENGE';
+  let directChallengeContext = null;
+  let directChallengeFallbackLocale = 'tr';
+
+  if (isDirectChallenge) {
+    directChallengeContext = await loadDirectChallengePushContext(notif);
+    directChallengeFallbackLocale = await resolveUserPreferredPushLocale(notif.user_id, 'tr');
+    logPushTelemetry('send_direct_challenge_context', {
+      notificationId: notif.id,
+      userId: notif.user_id,
+      hasContext: !!directChallengeContext,
+      challengeType: directChallengeContext?.challengeType || null,
+      fallbackLocale: directChallengeFallbackLocale,
+    });
+  }
+
   const pushData = buildPushDataPayload(notif);
   let sentCount = 0;
   let attemptedCount = 0;
@@ -1622,20 +1718,33 @@ async function sendPushForNotification(notif) {
     const token = normalizePushToken(row.token);
     if (!token) continue;
 
+    const perTokenContent = buildPerTokenPushContent({
+      notif,
+      tokenLocale: row.locale,
+      fallbackLocale: directChallengeFallbackLocale,
+      directChallengeContext,
+    });
+    const tokenPushData = {
+      ...pushData,
+      title: toPushDataValue(perTokenContent.title),
+      body: toPushDataValue(perTokenContent.body),
+      message: toPushDataValue(perTokenContent.body),
+    };
+
     attemptedCount += 1;
     const result = provider.mode === 'fcm_v1'
       ? await sendFcmV1Message({
         token,
-        title: notif.title,
-        body: notif.body,
-        data: pushData,
+        title: perTokenContent.title,
+        body: perTokenContent.body,
+        data: tokenPushData,
         serviceAccount: provider.serviceAccount,
       })
       : await sendFcmLegacyMessage({
         token,
-        title: notif.title,
-        body: notif.body,
-        data: pushData,
+        title: perTokenContent.title,
+        body: perTokenContent.body,
+        data: tokenPushData,
       });
 
     logPushTelemetry('send_attempt', {
@@ -1645,6 +1754,7 @@ async function sendPushForNotification(notif) {
       attempt: attemptedCount,
       platform: row.platform || 'unknown',
       locale: normalizePushLocale(row.locale, '') || null,
+      resolvedLocale: perTokenContent.locale || null,
       token: maskPushTokenForLogs(token),
       ok: !!result.ok,
       code: result.code || 'unknown',
