@@ -8125,7 +8125,7 @@ CREATE INDEX IF NOT EXISTS idx_bot_ecosystems_active ON bot_ecosystems(is_active
 });
 
 // Admin-only bulk push trigger for all in-app notification types.
-app.post('/api/admin/push/send-all-types', authMiddleware, async (req, res) => {
+adminStatsRouter.post('/push/send-all-types', async (req, res) => {
   try {
     const admin = await userById(req.userId);
     if (!admin || !admin.is_admin) {
