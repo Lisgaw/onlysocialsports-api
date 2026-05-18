@@ -6270,6 +6270,101 @@ async function resolvePersistCityId(rawCityId) {
   }
 }
 
+const BOT_TEXT_ENCODING_ISSUE_RE = /\u00C3|\u00C4|\u00C5|\u00E2|\uFFFD|\u011F\u0178|\u00D0|\u00D1/;
+const BOT_ENGLISH_FALLBACK_PHRASE_RE = /\b(looking for|all levels welcome|let'?s train|you should try|just had|just came back|want to organize|passionate about|where are you|train together|looking for a regular)\b/i;
+const BOT_ENGLISH_STOPWORDS = new Set([
+  'the',
+  'and',
+  'for',
+  'with',
+  'this',
+  'that',
+  'your',
+  'you',
+  'new',
+  'just',
+  'week',
+  'today',
+  'lets',
+  'looking',
+  'all',
+  'levels',
+  'welcome',
+  'are',
+  'where',
+  'train',
+  'together',
+  'want',
+  'organize',
+  'about',
+  'great',
+]);
+const BOT_ASCII_WORD_RE = /[a-z']+/g;
+
+function repairMojibakeText(value) {
+  const text = maybeString(value, 500);
+  if (!text) return '';
+
+  const hasMojibake = /\u00C3|\u00C4|\u00C5|\u00E2|\u00D1|\u00D0/.test(text);
+  if (!hasMojibake) return text;
+
+  try {
+    const repaired = Buffer.from(text, 'latin1').toString('utf8');
+    return maybeString(repaired, 500) || text;
+  } catch {
+    return text;
+  }
+}
+
+function hasBotTextEncodingIssue(value) {
+  if (typeof value !== 'string') return false;
+  const text = value.trim();
+  if (!text) return false;
+  return BOT_TEXT_ENCODING_ISSUE_RE.test(text);
+}
+
+function hasLikelyEnglishFallbackText(value) {
+  const lower = String(value || '').trim().toLowerCase();
+  if (!lower) return false;
+
+  // High-confidence phrases from old English fallback templates.
+  if (BOT_ENGLISH_FALLBACK_PHRASE_RE.test(lower)) return true;
+
+  const words = lower.match(BOT_ASCII_WORD_RE) || [];
+  if (words.length < 8) return false;
+
+  let stopwordHits = 0;
+  for (const word of words) {
+    if (BOT_ENGLISH_STOPWORDS.has(word)) stopwordHits += 1;
+  }
+  return stopwordHits >= 4;
+}
+
+function hasEnglishFallbackForLocale(value, locale) {
+  if (typeof value !== 'string') return false;
+  const text = value.trim();
+  if (!text) return false;
+  const lang = normalizePushLocale(locale, 'en') || 'en';
+  if (lang === 'en') return false;
+  return hasLikelyEnglishFallbackText(text);
+}
+
+function pickPrimarySportIdFromProfile(bot, fallbackSportId = '') {
+  const sports = Array.isArray(bot?.sports) ? bot.sports : [];
+  const first = sports[0];
+  if (first && typeof first === 'object' && first.id) return String(first.id);
+  if (typeof first === 'string' && first.trim()) return first.trim();
+  return fallbackSportId || '';
+}
+
+function chunkList(items, chunkSize = 200) {
+  const out = [];
+  for (let i = 0; i < items.length; i += chunkSize) {
+    out.push(items.slice(i, i + chunkSize));
+  }
+  return out;
+}
+
 const ecosystemRouter = express.Router();
 ecosystemRouter.use(authMiddleware);
 
@@ -6658,6 +6753,241 @@ ecosystemRouter.post('/tick-all', async (req, res) => {
     }
     res.json({ success: true, data: results, total: ecosystems.length });
   } catch (e) { res.status(500).json({ message: e.message }); }
+});
+
+/**
+ * POST /api/admin/ecosystems/repair-content
+ * Repair locale/encoding issues for existing bot bios/listings/posts/comments.
+ * body: { dryRun?: boolean, force?: boolean }
+ */
+ecosystemRouter.post('/repair-content', async (req, res) => {
+  try {
+    const botAutomation = getBotAutomation();
+    if (!botAutomation) return res.status(500).json({ message: 'Bot automation module not available.' });
+
+    const body = sanitize(req.body || {});
+    const dryRun = body.dryRun === true;
+    const force = body.force === true;
+
+    await ensureSportIcons();
+    await ensureRequiredListingSports();
+
+    const client = db.raw();
+    const { data: botData, error: botError } = await client
+      .from('users')
+      .select('id,name,country_code,city,bio,sports,is_bot')
+      .eq('is_bot', true);
+    if (botError) throw botError;
+
+    const bots = botData || [];
+    const stats = {
+      dryRun,
+      force,
+      botsScanned: bots.length,
+      biosScanned: 0,
+      biosUpdated: 0,
+      listingsScanned: 0,
+      listingsUpdated: 0,
+      postsScanned: 0,
+      postsUpdated: 0,
+      commentsScanned: 0,
+      commentsUpdated: 0,
+    };
+
+    if (bots.length === 0) {
+      return res.json({
+        success: true,
+        message: 'No bots found for repair.',
+        data: stats,
+      });
+    }
+
+    const botById = new Map(bots.map(bot => [bot.id, bot]));
+    const botIds = bots.map(bot => bot.id).filter(Boolean);
+
+    const allSports = await db.query('sports').catch(() => []);
+    const sportById = new Map((allSports || []).filter(Boolean).map(s => [s.id, s]));
+
+    for (const bot of bots) {
+      stats.biosScanned += 1;
+      const locale = botAutomation.mapCountryCodeToLocale(bot.country_code || 'EN');
+      const sportId = pickPrimarySportIdFromProfile(bot, '');
+      const sport = sportById.get(sportId) || null;
+      const localizedSportName = sport
+        ? botAutomation.translateSportName(sport.id, locale, sport.name)
+        : null;
+      const desiredBio = botAutomation.generateBotBio({
+        locale,
+        sportName: localizedSportName,
+        cityName: bot.city || '',
+      });
+
+      const needsBioRepair = force
+        || !maybeString(bot.bio, 400)
+        || hasBotTextEncodingIssue(bot.bio)
+        || hasEnglishFallbackForLocale(bot.bio, locale);
+
+      if (!needsBioRepair || !desiredBio || desiredBio === bot.bio) continue;
+      stats.biosUpdated += 1;
+      if (!dryRun) {
+        await db.update('users', bot.id, { bio: desiredBio });
+      }
+    }
+
+    for (const idChunk of chunkList(botIds, 180)) {
+      const { data: listings, error: listingError } = await client
+        .from('listings')
+        .select('id,user_id,sport_id,sport_name,title,description,city_name')
+        .in('user_id', idChunk);
+      if (listingError) throw listingError;
+
+      for (const listing of (listings || [])) {
+        stats.listingsScanned += 1;
+        const bot = botById.get(listing.user_id);
+        if (!bot) continue;
+
+        const locale = botAutomation.mapCountryCodeToLocale(bot.country_code || 'EN');
+        const fallbackSportId = pickPrimarySportIdFromProfile(bot, '');
+        const sportId = String(listing.sport_id || fallbackSportId || '').trim();
+        const sport = sportById.get(sportId) || null;
+        const sourceSportName = sport?.name || maybeString(listing.sport_name, 80) || 'sport';
+        const localizedSportName = botAutomation.translateSportName
+          ? botAutomation.translateSportName(sportId, locale, sourceSportName)
+          : sourceSportName;
+
+        const cityName = listing.city_name || bot.city || '';
+        const desiredTitle = botAutomation.generateListingDesc({
+          name: bot.name,
+          sport: localizedSportName,
+          locale,
+          city: cityName,
+        });
+        const desiredDescription = botAutomation.generateListingDesc({
+          name: bot.name,
+          sport: localizedSportName,
+          locale,
+          city: cityName,
+        });
+
+        const needsListingRepair = force
+          || hasBotTextEncodingIssue(listing.title)
+          || hasBotTextEncodingIssue(listing.description)
+          || hasBotTextEncodingIssue(listing.sport_name)
+          || hasEnglishFallbackForLocale(listing.title, locale)
+          || hasEnglishFallbackForLocale(listing.description, locale)
+          || !maybeString(listing.title, 250)
+          || !maybeString(listing.description, 500)
+          || (locale !== 'en' && localizedSportName && listing.sport_name !== localizedSportName);
+
+        if (!needsListingRepair) continue;
+
+        const patch = {
+          sport_name: localizedSportName,
+          title: desiredTitle,
+          description: desiredDescription,
+        };
+
+        stats.listingsUpdated += 1;
+        if (!dryRun) {
+          await db.update('listings', listing.id, patch);
+        }
+      }
+    }
+
+    for (const idChunk of chunkList(botIds, 180)) {
+      const { data: posts, error: postError } = await client
+        .from('posts')
+        .select('id,user_id,post_type,sport_id,title,content,city_name')
+        .eq('post_type', 'SOCIAL_LISTING')
+        .in('user_id', idChunk);
+      if (postError) throw postError;
+
+      for (const post of (posts || [])) {
+        stats.postsScanned += 1;
+        const bot = botById.get(post.user_id);
+        if (!bot) continue;
+
+        const locale = botAutomation.mapCountryCodeToLocale(bot.country_code || 'EN');
+        const fallbackSportId = pickPrimarySportIdFromProfile(bot, '');
+        const sportId = String(post.sport_id || fallbackSportId || '').trim();
+        const sport = sportById.get(sportId) || null;
+        const sourceSportName = sport?.name || 'sport';
+        const localizedSportName = botAutomation.translateSportName
+          ? botAutomation.translateSportName(sportId, locale, sourceSportName)
+          : sourceSportName;
+
+        const generated = botAutomation.generateBotSocialListing
+          ? botAutomation.generateBotSocialListing({
+              locale,
+              sportName: localizedSportName,
+              cityName: post.city_name || bot.city || '',
+              botName: bot.name,
+            })
+          : {
+              kind: 'SPORT',
+              title: null,
+              content: botAutomation.generateBotSocialPost({
+                locale,
+                sportName: localizedSportName,
+                cityName: post.city_name || bot.city || '',
+                botName: bot.name,
+              }),
+            };
+
+        const needsPostRepair = force
+          || hasBotTextEncodingIssue(post.content)
+          || hasBotTextEncodingIssue(post.title)
+          || hasEnglishFallbackForLocale(post.content, locale)
+          || hasEnglishFallbackForLocale(post.title, locale)
+          || !maybeString(post.content, 1500);
+
+        if (!needsPostRepair) continue;
+
+        const patch = {
+          content: generated.content,
+          title: generated.title || null,
+        };
+        if (generated.kind === 'SPORT' && sportId) {
+          patch.sport_id = sportId;
+        }
+
+        stats.postsUpdated += 1;
+        if (!dryRun) {
+          await db.update('posts', post.id, patch);
+        }
+      }
+    }
+
+    for (const idChunk of chunkList(botIds, 180)) {
+      const { data: comments, error: commentError } = await client
+        .from('comments')
+        .select('id,user_id,content')
+        .in('user_id', idChunk);
+      if (commentError) throw commentError;
+
+      for (const comment of (comments || [])) {
+        stats.commentsScanned += 1;
+        if (!hasBotTextEncodingIssue(comment.content)) continue;
+
+        const repaired = repairMojibakeText(comment.content);
+        if (!repaired || repaired === comment.content) continue;
+
+        stats.commentsUpdated += 1;
+        if (!dryRun) {
+          await db.update('comments', comment.id, { content: repaired });
+        }
+      }
+    }
+
+    res.json({
+      success: true,
+      message: dryRun ? 'Bot content repair completed (dry run).' : 'Bot content repair completed.',
+      data: stats,
+    });
+  } catch (e) {
+    console.error('Ecosystem repair-content error:', e);
+    res.status(500).json({ message: e.message || 'Bot content repair failed.' });
+  }
 });
 
 /**
