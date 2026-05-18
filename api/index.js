@@ -1514,7 +1514,7 @@ async function loadDirectChallengePushContext(notif) {
 
   try {
     const challenge = await db.findById('challenges', challengeId);
-    if (!challenge) return context;
+    if (!challenge) return null;
 
     context.challengeType = challenge.challenge_type || 'RIVAL';
     context.sportId = challenge.sport_id || '';
@@ -1536,7 +1536,7 @@ async function loadDirectChallengePushContext(notif) {
       userId: notif?.user_id || null,
       error: clipForLogs(error?.message || error),
     });
-    return context;
+    return null;
   }
 }
 
