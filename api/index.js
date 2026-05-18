@@ -1498,7 +1498,7 @@ function buildPerTokenPushContent({
   };
 }
 
-async function sendFcmLegacyMessage({ token, title, body, data }) {
+async function sendFcmLegacyMessage({ token, title, body, data, notificationTag }) {
   if (typeof fetch !== 'function') {
     return { ok: false, code: 'fetch_unavailable', message: 'Global fetch is not available.' };
   }
@@ -1512,13 +1512,25 @@ async function sendFcmLegacyMessage({ token, title, body, data }) {
   const timeoutHandle = setTimeout(() => controller.abort(), PUSH_FCM_TIMEOUT_MS);
 
   try {
+    const normalizedTag = maybeString(notificationTag, 180)
+      || maybeString(data?.notificationId, 180)
+      || maybeString(data?.id, 180)
+      || '';
+
+    const notificationPayload = {
+      title: title || 'SporPartner',
+      body: body || '',
+      sound: 'default',
+      android_channel_id: 'sp_high_importance',
+    };
+    if (normalizedTag) {
+      notificationPayload.tag = normalizedTag;
+    }
+
     const payload = {
       to: token,
       priority: 'high',
-      notification: {
-        title: title || 'SporPartner',
-        body: body || '',
-      },
+      notification: notificationPayload,
       data: data || {},
       content_available: true,
       mutable_content: true,
@@ -1574,7 +1586,7 @@ async function sendFcmLegacyMessage({ token, title, body, data }) {
   }
 }
 
-async function sendFcmV1Message({ token, title, body, data, serviceAccount }) {
+async function sendFcmV1Message({ token, title, body, data, serviceAccount, notificationTag }) {
   if (typeof fetch !== 'function') {
     return { ok: false, code: 'fetch_unavailable', message: 'Global fetch is not available.' };
   }
@@ -1595,6 +1607,19 @@ async function sendFcmV1Message({ token, title, body, data, serviceAccount }) {
   const timeoutHandle = setTimeout(() => controller.abort(), PUSH_FCM_TIMEOUT_MS);
 
   try {
+    const normalizedTag = maybeString(notificationTag, 180)
+      || maybeString(data?.notificationId, 180)
+      || maybeString(data?.id, 180)
+      || '';
+
+    const androidNotification = {
+      channel_id: 'sp_high_importance',
+      sound: 'default',
+    };
+    if (normalizedTag) {
+      androidNotification.tag = normalizedTag;
+    }
+
     const endpoint = `https://fcm.googleapis.com/v1/projects/${encodeURIComponent(account.projectId)}/messages:send`;
     const payload = {
       message: {
@@ -1604,6 +1629,10 @@ async function sendFcmV1Message({ token, title, body, data, serviceAccount }) {
           body: body || '',
         },
         data: data || {},
+        android: {
+          priority: 'HIGH',
+          notification: androidNotification,
+        },
       },
     };
 
@@ -1736,6 +1765,10 @@ async function sendPushForNotification(notif) {
       body: toPushDataValue(perTokenContent.body),
       message: toPushDataValue(perTokenContent.body),
     };
+    const notificationTag = maybeString(tokenPushData.notificationId, 180)
+      || maybeString(tokenPushData.id, 180)
+      || maybeString(notif.id, 180)
+      || '';
 
     attemptedCount += 1;
     const result = provider.mode === 'fcm_v1'
@@ -1745,12 +1778,14 @@ async function sendPushForNotification(notif) {
         body: perTokenContent.body,
         data: tokenPushData,
         serviceAccount: provider.serviceAccount,
+        notificationTag,
       })
       : await sendFcmLegacyMessage({
         token,
         title: perTokenContent.title,
         body: perTokenContent.body,
         data: tokenPushData,
+        notificationTag,
       });
 
     logPushTelemetry('send_attempt', {
@@ -5278,7 +5313,18 @@ app.get('/api/notifications', authMiddleware, async (req, res) => {
       .range(skip, skip + limit - 1);
 
     const unread = await db.count('notifications', { user_id: req.userId, is_read: false });
-    const mapped = (data || []).map(n => ({ ...toCamel(n), read: !!n.is_read }));
+    const mapped = (data || []).map((n) => {
+      const repairedTitle = repairMojibakeText(n.title);
+      const repairedBody = repairMojibakeText(n.body);
+      return {
+        ...toCamel({
+          ...n,
+          title: repairedTitle || maybeString(n.title, 500) || '',
+          body: repairedBody || maybeString(n.body, 1000) || '',
+        }),
+        read: !!n.is_read,
+      };
+    });
     res.json({ data: mapped, unreadCount: unread, total: count || 0, hasMore: page * limit < (count || 0), page });
   } catch (e) { res.status(500).json({ message: e.message }); }
 });
@@ -8125,6 +8171,89 @@ CREATE INDEX IF NOT EXISTS idx_bot_ecosystems_active ON bot_ecosystems(is_active
 });
 
 // Admin-only bulk push trigger for all in-app notification types.
+adminStatsRouter.post('/push/repair-existing-notifications', async (req, res) => {
+  try {
+    const admin = await userById(req.userId);
+    if (!admin || !admin.is_admin) {
+      return res.status(403).json({ message: 'Admin only.' });
+    }
+
+    const targetEmail = String(req.body?.targetEmail || '').trim().toLowerCase();
+    const dryRun = req.body?.dryRun === true || req.body?.dryRun === 'true';
+    const limitRaw = Number.parseInt(String(req.body?.limit || '2000'), 10);
+    const limit = Number.isFinite(limitRaw) ? Math.min(5000, Math.max(1, limitRaw)) : 2000;
+
+    let targetUserId = null;
+    if (targetEmail) {
+      const targetUser = await db.findOne('users', { email: targetEmail });
+      if (!targetUser) {
+        return res.status(404).json({ message: 'Hedef kullanıcı bulunamadı.' });
+      }
+      targetUserId = targetUser.id;
+    }
+
+    const client = db.raw();
+    let query = client
+      .from('notifications')
+      .select('id,user_id,type,title,body,created_at')
+      .order('created_at', { ascending: false })
+      .limit(limit);
+
+    if (targetUserId) {
+      query = query.eq('user_id', targetUserId);
+    }
+
+    const { data, error } = await query;
+    if (error) throw error;
+
+    let repairedCount = 0;
+    const samples = [];
+
+    for (const row of (data || [])) {
+      const nextTitle = repairMojibakeText(row.title) || maybeString(row.title, 500) || '';
+      const nextBody = repairMojibakeText(row.body) || maybeString(row.body, 1000) || '';
+      const prevTitle = maybeString(row.title, 500) || '';
+      const prevBody = maybeString(row.body, 1000) || '';
+      const changed = nextTitle !== prevTitle || nextBody !== prevBody;
+
+      if (!changed) continue;
+
+      repairedCount += 1;
+      if (!dryRun) {
+        await db.update('notifications', row.id, {
+          title: nextTitle,
+          body: nextBody,
+        }).catch(() => {});
+      }
+
+      if (samples.length < 20) {
+        samples.push({
+          id: row.id,
+          type: row.type,
+          beforeTitle: prevTitle,
+          beforeBody: prevBody,
+          afterTitle: nextTitle,
+          afterBody: nextBody,
+          createdAt: row.created_at,
+        });
+      }
+    }
+
+    return res.json({
+      ok: true,
+      dryRun,
+      targetEmail: targetEmail || null,
+      targetUserId,
+      scannedCount: (data || []).length,
+      repairedCount,
+      samples,
+    });
+  } catch (e) {
+    return res.status(500).json({ message: e.message || 'Notification repair failed.' });
+  }
+});
+
+// Admin-only bulk push trigger for all in-app notification types.
 adminStatsRouter.post('/push/send-all-types', async (req, res) => {
   try {
     const admin = await userById(req.userId);
@@ -8146,6 +8275,8 @@ adminStatsRouter.post('/push/send-all-types', async (req, res) => {
     const senderName = maybeString(sender?.name, 80) || 'Birisi';
     const senderId = sender?.id || admin.id;
     const senderAvatar = sender?.avatar_url || null;
+    const delayRaw = Number.parseInt(String(req.body?.delayMs || '900'), 10);
+    const delayMs = Number.isFinite(delayRaw) ? Math.min(3000, Math.max(0, delayRaw)) : 900;
     const runId = `push_all_types_api_${Date.now()}`;
 
     const typePhraseMap = Object.freeze({
@@ -8172,6 +8303,8 @@ adminStatsRouter.post('/push/send-all-types', async (req, res) => {
       COMMENT_LIKE: 'yorumunuzu be\u011Fendi',
       QUOTA_FULL: '\uD83D\uDCCC \u0130lan kapasitesi doldu',
     });
+    const typeEntries = Object.entries(typePhraseMap);
+    const tokenProbe = await listActivePushTokens(receiver.id, 20).catch(() => ({ tokens: [], reason: 'probe_error' }));
 
     const actorTypes = new Set([
       'NEW_INTEREST',
@@ -8196,7 +8329,8 @@ adminStatsRouter.post('/push/send-all-types', async (req, res) => {
     ]);
 
     const sent = [];
-    for (const [type, phrase] of Object.entries(typePhraseMap)) {
+    for (const [index, entry] of typeEntries.entries()) {
+      const [type, phrase] = entry;
       let title = phrase;
       let body = actorTypes.has(type) ? `${senderName} ${phrase}` : phrase;
 
@@ -8223,15 +8357,29 @@ adminStatsRouter.post('/push/send-all-types', async (req, res) => {
         title: pushed.title,
         body: pushed.body,
       });
+
+      if (delayMs > 0 && index < typeEntries.length - 1) {
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
     }
 
     return res.json({
       ok: true,
       runId,
+      delayMs,
       target: {
         id: receiver.id,
         email: receiver.email,
         name: receiver.name || null,
+      },
+      targetPushTokens: {
+        count: (tokenProbe.tokens || []).length,
+        reason: tokenProbe.reason || 'ok',
+        tokens: (tokenProbe.tokens || []).slice(0, 5).map((row) => ({
+          token: maskPushTokenForLogs(row.token),
+          platform: row.platform || null,
+          locale: row.locale || null,
+        })),
       },
       sender: {
         id: senderId,
