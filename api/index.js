@@ -8124,6 +8124,127 @@ CREATE INDEX IF NOT EXISTS idx_bot_ecosystems_active ON bot_ecosystems(is_active
   ` });
 });
 
+// Admin-only bulk push trigger for all in-app notification types.
+app.post('/api/admin/push/send-all-types', authMiddleware, async (req, res) => {
+  try {
+    const admin = await userById(req.userId);
+    if (!admin || !admin.is_admin) {
+      return res.status(403).json({ message: 'Admin only.' });
+    }
+
+    const targetEmail = String(req.body?.targetEmail || 'yusufadmin@sporpartner.com').trim().toLowerCase();
+    const receiver = await db.findOne('users', { email: targetEmail });
+    if (!receiver) {
+      return res.status(404).json({ message: 'Hedef kullan\u0131c\u0131 bulunamad\u0131.' });
+    }
+
+    let sender = null;
+    const botRows = await db.query('users', { filters: { is_bot: true }, limit: 1 }).catch(() => []);
+    if (botRows?.length) sender = botRows[0];
+    if (!sender) sender = admin;
+
+    const senderName = maybeString(sender?.name, 80) || 'Birisi';
+    const senderId = sender?.id || admin.id;
+    const senderAvatar = sender?.avatar_url || null;
+    const runId = `push_all_types_api_${Date.now()}`;
+
+    const typePhraseMap = Object.freeze({
+      NEW_INTEREST: 'ilan\u0131n\u0131za ba\u015Fvurdu',
+      NEW_MATCH: 'ile yeni bir e\u015Fle\u015Fme olu\u015Ftu!',
+      LISTING_MATCHED: 'ilan\u0131n\u0131zda e\u015Fle\u015Fme ger\u00E7ekle\u015Fti!',
+      RESPONSE_ACCEPTED: 'ba\u015Fvurunuzu kabul etti',
+      RESPONSE_REJECTED: 'ba\u015Fvurunuzu reddetti',
+      NEW_RATING: 'sizi de\u011Ferlendirdi',
+      MATCH_STATUS_CHANGED: 'ma\u00E7\u0131 oynad\u0131\u011F\u0131n\u0131 onaylad\u0131',
+      MATCH_REMINDER: 'ma\u00E7\u0131 oynad\u0131\u011F\u0131n\u0131 onaylad\u0131',
+      MATCH_COMPLETED: '\u2B50 Ma\u00E7 tamamland\u0131! De\u011Ferlendirme zaman\u0131',
+      MATCH_OTP_REQUESTED: 'do\u011Frulama kodu istedi',
+      NO_SHOW_WARNING: 'ma\u00E7a kat\u0131lmad\u0131 olarak i\u015Faretlendi',
+      FOLLOW_REQUEST: 'takip iste\u011Fi g\u00F6nderdi',
+      NEW_FOLLOWER: 'sizi takip etmeye ba\u015Flad\u0131',
+      FOLLOW_ACCEPTED: 'takip iste\u011Finizi kabul etti',
+      DIRECT_CHALLENGE: 'sizi meydan okumaya davet etti',
+      NEW_MESSAGE: 'size mesaj g\u00F6nderdi',
+      POST_REACT: 'g\u00F6nderinize tepki verdi',
+      POST_LIKE: 'g\u00F6nderinizi be\u011Fendi',
+      POST_COMMENT: 'g\u00F6nderinize yorum yapt\u0131',
+      COMMENT_REPLY: 'yorumunuza yan\u0131t verdi',
+      COMMENT_LIKE: 'yorumunuzu be\u011Fendi',
+      QUOTA_FULL: '\uD83D\uDCCC \u0130lan kapasitesi doldu',
+    });
+
+    const actorTypes = new Set([
+      'NEW_INTEREST',
+      'NEW_MATCH',
+      'RESPONSE_ACCEPTED',
+      'RESPONSE_REJECTED',
+      'NEW_RATING',
+      'MATCH_STATUS_CHANGED',
+      'MATCH_REMINDER',
+      'MATCH_OTP_REQUESTED',
+      'NO_SHOW_WARNING',
+      'FOLLOW_REQUEST',
+      'NEW_FOLLOWER',
+      'FOLLOW_ACCEPTED',
+      'DIRECT_CHALLENGE',
+      'NEW_MESSAGE',
+      'POST_REACT',
+      'POST_LIKE',
+      'POST_COMMENT',
+      'COMMENT_REPLY',
+      'COMMENT_LIKE',
+    ]);
+
+    const sent = [];
+    for (const [type, phrase] of Object.entries(typePhraseMap)) {
+      let title = phrase;
+      let body = actorTypes.has(type) ? `${senderName} ${phrase}` : phrase;
+
+      if (type === 'DIRECT_CHALLENGE') {
+        title = '\uD83E\uDD1D Partner Teklifi!';
+        body = `${senderName} sana futbol teklifi g\u00F6nderdi.`;
+      }
+
+      const pushed = await pushNotification({
+        userId: receiver.id,
+        type,
+        title,
+        body,
+        relatedId: `${runId}:${type}`,
+        link: `/qa/push-all-types/${type}`,
+        senderId,
+        senderName,
+        senderAvatar,
+      });
+
+      sent.push({
+        id: pushed.id,
+        type,
+        title: pushed.title,
+        body: pushed.body,
+      });
+    }
+
+    return res.json({
+      ok: true,
+      runId,
+      target: {
+        id: receiver.id,
+        email: receiver.email,
+        name: receiver.name || null,
+      },
+      sender: {
+        id: senderId,
+        name: senderName,
+      },
+      sentCount: sent.length,
+      sent,
+    });
+  } catch (e) {
+    return res.status(500).json({ message: e.message || 'Push bulk send failed.' });
+  }
+});
+
 // â”€â”€ 404 â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 app.use((req, res) => res.status(404).json({ message: `Endpoint bulunamadÄ±: ${req.method} ${req.path}` }));
 
