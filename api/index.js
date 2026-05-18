@@ -747,12 +747,15 @@ async function getPrivacy(userId) {
 }
 
 async function pushNotification(n) {
+  const repairedTitle = repairMojibakeText(n.title);
+  const repairedBody = repairMojibakeText(n.body);
+
   const notif = {
     id: uuid(),
     user_id: n.userId,
     type: n.type,
-    title: n.title,
-    body: n.body,
+    title: repairedTitle || maybeString(n.title, 500) || '',
+    body: repairedBody || maybeString(n.body, 1000) || '',
     related_id: n.relatedId || null,
     link: n.link || null,
     sender_id: n.senderId || null,
@@ -1465,9 +1468,12 @@ function buildPerTokenPushContent({
     || 'tr';
 
   if (!directChallengeContext) {
+    const repairedTitle = repairMojibakeText(notif.title);
+    const repairedBody = repairMojibakeText(notif.body);
+
     return {
-      title: notif.title,
-      body: notif.body,
+      title: repairedTitle || maybeString(notif.title, 500) || '',
+      body: repairedBody || maybeString(notif.body, 1000) || '',
       locale: resolvedLocale,
     };
   }
