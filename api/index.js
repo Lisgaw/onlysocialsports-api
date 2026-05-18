@@ -903,6 +903,90 @@ const DIRECT_CHALLENGE_COPY = Object.freeze({
     sportFallback: 'খেলা',
   },
 });
+const NOTIFICATION_PHRASE_FALLBACK_TR = Object.freeze({
+  NEW_INTEREST: 'ilan\u0131n\u0131za ba\u015Fvurdu',
+  NEW_MATCH: 'ile yeni bir e\u015Fle\u015Fme olu\u015Ftu!',
+  LISTING_MATCHED: 'ilan\u0131n\u0131zda e\u015Fle\u015Fme ger\u00E7ekle\u015Fti!',
+  RESPONSE_ACCEPTED: 'ba\u015Fvurunuzu kabul etti',
+  RESPONSE_REJECTED: 'ba\u015Fvurunuzu reddetti',
+  NEW_RATING: 'sizi de\u011Ferlendirdi',
+  MATCH_STATUS_CHANGED: 'ma\u00E7\u0131 oynad\u0131\u011F\u0131n\u0131 onaylad\u0131',
+  MATCH_REMINDER: 'ma\u00E7\u0131 oynad\u0131\u011F\u0131n\u0131 onaylad\u0131',
+  MATCH_COMPLETED: '\u2B50 Ma\u00E7 tamamland\u0131! De\u011Ferlendirme zaman\u0131',
+  MATCH_OTP_REQUESTED: 'do\u011Frulama kodu istedi',
+  NO_SHOW_WARNING: 'ma\u00E7a kat\u0131lmad\u0131 olarak i\u015Faretlendi',
+  FOLLOW_REQUEST: 'takip iste\u011Fi g\u00F6nderdi',
+  NEW_FOLLOWER: 'sizi takip etmeye ba\u015Flad\u0131',
+  FOLLOW_ACCEPTED: 'takip iste\u011Finizi kabul etti',
+  DIRECT_CHALLENGE: 'sizi meydan okumaya davet etti',
+  NEW_MESSAGE: 'size mesaj g\u00F6nderdi',
+  POST_REACT: 'g\u00F6nderinize tepki verdi',
+  POST_LIKE: 'g\u00F6nderinizi be\u011Fendi',
+  POST_COMMENT: 'g\u00F6nderinize yorum yapt\u0131',
+  COMMENT_REPLY: 'yorumunuza yan\u0131t verdi',
+  COMMENT_LIKE: 'yorumunuzu be\u011Fendi',
+  QUOTA_FULL: '\uD83D\uDCCC \u0130lan kapasitesi doldu',
+});
+const NOTIFICATION_ACTOR_TYPES = new Set([
+  'NEW_INTEREST',
+  'NEW_MATCH',
+  'RESPONSE_ACCEPTED',
+  'RESPONSE_REJECTED',
+  'NEW_RATING',
+  'MATCH_STATUS_CHANGED',
+  'MATCH_REMINDER',
+  'MATCH_OTP_REQUESTED',
+  'NO_SHOW_WARNING',
+  'FOLLOW_REQUEST',
+  'NEW_FOLLOWER',
+  'FOLLOW_ACCEPTED',
+  'DIRECT_CHALLENGE',
+  'NEW_MESSAGE',
+  'POST_REACT',
+  'POST_LIKE',
+  'POST_COMMENT',
+  'COMMENT_REPLY',
+  'COMMENT_LIKE',
+]);
+const NOTIFICATION_TYPE_ORDER = Object.freeze(Object.keys(NOTIFICATION_PHRASE_FALLBACK_TR));
+let notificationTypePhrasesByLocaleCache = null;
+
+function loadNotificationTypePhrasesByLocale() {
+  if (notificationTypePhrasesByLocaleCache) return notificationTypePhrasesByLocaleCache;
+
+  try {
+    const fs = require('fs');
+    const path = require('path');
+    const raw = fs.readFileSync(path.join(__dirname, 'notification_type_phrases.json'), 'utf8').replace(/^\uFEFF/, '');
+    const parsed = JSON.parse(raw);
+
+    if (parsed && typeof parsed === 'object') {
+      notificationTypePhrasesByLocaleCache = parsed;
+      return notificationTypePhrasesByLocaleCache;
+    }
+  } catch {
+    // fall through to empty map
+  }
+
+  notificationTypePhrasesByLocaleCache = {};
+  return notificationTypePhrasesByLocaleCache;
+}
+
+function getNotificationTypePhraseForLocale(notifType, locale = 'tr') {
+  const normalizedType = String(notifType || '').trim().toUpperCase();
+  if (!normalizedType) return '';
+
+  const lang = normalizePushLocale(locale, 'tr') || 'tr';
+  const phraseMap = loadNotificationTypePhrasesByLocale();
+  const localized = maybeString(phraseMap?.[lang]?.[normalizedType], 240);
+  if (localized) return localized;
+
+  const fallbackTr = maybeString(NOTIFICATION_PHRASE_FALLBACK_TR[normalizedType], 240);
+  if (fallbackTr) return fallbackTr;
+
+  return normalizedType.toLowerCase();
+}
+
 const FCM_LEGACY_ENDPOINT = 'https://fcm.googleapis.com/fcm/send';
 const FCM_OAUTH_TOKEN_ENDPOINT = 'https://oauth2.googleapis.com/token';
 const FCM_OAUTH_SCOPE = 'https://www.googleapis.com/auth/firebase.messaging';
@@ -8385,66 +8469,31 @@ adminStatsRouter.post('/push/send-all-types', async (req, res) => {
     const senderAvatar = sender?.avatar_url || null;
     const delayRaw = Number.parseInt(String(req.body?.delayMs || '900'), 10);
     const delayMs = Number.isFinite(delayRaw) ? Math.min(3000, Math.max(0, delayRaw)) : 900;
+    const requestedLocale = normalizePushLocale(req.body?.locale, '');
+    const sendLocale = requestedLocale || await resolveUserPreferredPushLocale(receiver.id, 'tr');
     const runId = `push_all_types_api_${Date.now()}`;
-
-    const typePhraseMap = Object.freeze({
-      NEW_INTEREST: 'ilan\u0131n\u0131za ba\u015Fvurdu',
-      NEW_MATCH: 'ile yeni bir e\u015Fle\u015Fme olu\u015Ftu!',
-      LISTING_MATCHED: 'ilan\u0131n\u0131zda e\u015Fle\u015Fme ger\u00E7ekle\u015Fti!',
-      RESPONSE_ACCEPTED: 'ba\u015Fvurunuzu kabul etti',
-      RESPONSE_REJECTED: 'ba\u015Fvurunuzu reddetti',
-      NEW_RATING: 'sizi de\u011Ferlendirdi',
-      MATCH_STATUS_CHANGED: 'ma\u00E7\u0131 oynad\u0131\u011F\u0131n\u0131 onaylad\u0131',
-      MATCH_REMINDER: 'ma\u00E7\u0131 oynad\u0131\u011F\u0131n\u0131 onaylad\u0131',
-      MATCH_COMPLETED: '\u2B50 Ma\u00E7 tamamland\u0131! De\u011Ferlendirme zaman\u0131',
-      MATCH_OTP_REQUESTED: 'do\u011Frulama kodu istedi',
-      NO_SHOW_WARNING: 'ma\u00E7a kat\u0131lmad\u0131 olarak i\u015Faretlendi',
-      FOLLOW_REQUEST: 'takip iste\u011Fi g\u00F6nderdi',
-      NEW_FOLLOWER: 'sizi takip etmeye ba\u015Flad\u0131',
-      FOLLOW_ACCEPTED: 'takip iste\u011Finizi kabul etti',
-      DIRECT_CHALLENGE: 'sizi meydan okumaya davet etti',
-      NEW_MESSAGE: 'size mesaj g\u00F6nderdi',
-      POST_REACT: 'g\u00F6nderinize tepki verdi',
-      POST_LIKE: 'g\u00F6nderinizi be\u011Fendi',
-      POST_COMMENT: 'g\u00F6nderinize yorum yapt\u0131',
-      COMMENT_REPLY: 'yorumunuza yan\u0131t verdi',
-      COMMENT_LIKE: 'yorumunuzu be\u011Fendi',
-      QUOTA_FULL: '\uD83D\uDCCC \u0130lan kapasitesi doldu',
-    });
-    const typeEntries = Object.entries(typePhraseMap);
     const tokenProbe = await listActivePushTokens(receiver.id, 20).catch(() => ({ tokens: [], reason: 'probe_error' }));
 
-    const actorTypes = new Set([
-      'NEW_INTEREST',
-      'NEW_MATCH',
-      'RESPONSE_ACCEPTED',
-      'RESPONSE_REJECTED',
-      'NEW_RATING',
-      'MATCH_STATUS_CHANGED',
-      'MATCH_REMINDER',
-      'MATCH_OTP_REQUESTED',
-      'NO_SHOW_WARNING',
-      'FOLLOW_REQUEST',
-      'NEW_FOLLOWER',
-      'FOLLOW_ACCEPTED',
-      'DIRECT_CHALLENGE',
-      'NEW_MESSAGE',
-      'POST_REACT',
-      'POST_LIKE',
-      'POST_COMMENT',
-      'COMMENT_REPLY',
-      'COMMENT_LIKE',
-    ]);
-
     const sent = [];
-    for (const [index, entry] of typeEntries.entries()) {
-      const [type, phrase] = entry;
+    for (const [index, type] of NOTIFICATION_TYPE_ORDER.entries()) {
+      const phrase = getNotificationTypePhraseForLocale(type, sendLocale);
       let title = phrase;
-      let body = actorTypes.has(type) ? `${senderName} ${phrase}` : phrase;
+      let body = NOTIFICATION_ACTOR_TYPES.has(type) ? `${senderName} ${phrase}` : phrase;
 
       if (type === 'DIRECT_CHALLENGE') {
-        title = '\uD83E\uDD1D Partner Teklifi!';
-        body = `${senderName} sana futbol teklifi g\u00F6nderdi.`;
+        const localizedSport = localizeSportNameForPush({
+          sportId: '',
+          rawName: 'futbol',
+          locale: sendLocale,
+        });
+        const challengeCopy = buildDirectChallengePushCopy({
+          locale: sendLocale,
+          challengeType: 'PARTNER',
+          senderName,
+          sportName: localizedSport,
+        });
+        title = challengeCopy.title;
+        body = challengeCopy.body;
       }
 
       const pushed = await pushNotification({
@@ -8466,7 +8515,7 @@ adminStatsRouter.post('/push/send-all-types', async (req, res) => {
         body: pushed.body,
       });
 
-      if (delayMs > 0 && index < typeEntries.length - 1) {
+      if (delayMs > 0 && index < NOTIFICATION_TYPE_ORDER.length - 1) {
         await new Promise((resolve) => setTimeout(resolve, delayMs));
       }
     }
@@ -8474,6 +8523,7 @@ adminStatsRouter.post('/push/send-all-types', async (req, res) => {
     return res.json({
       ok: true,
       runId,
+      locale: sendLocale,
       delayMs,
       target: {
         id: receiver.id,
