@@ -5314,13 +5314,17 @@ app.get('/api/notifications', authMiddleware, async (req, res) => {
 
     const unread = await db.count('notifications', { user_id: req.userId, is_read: false });
     const mapped = (data || []).map((n) => {
-      const repairedTitle = repairMojibakeText(n.title);
-      const repairedBody = repairMojibakeText(n.body);
+      const normalized = normalizeNotificationTextForRepair({
+        type: n.type,
+        title: n.title,
+        body: n.body,
+        senderName: n.sender_name,
+      });
       return {
         ...toCamel({
           ...n,
-          title: repairedTitle || maybeString(n.title, 500) || '',
-          body: repairedBody || maybeString(n.body, 1000) || '',
+          title: normalized.title || maybeString(n.title, 500) || '',
+          body: normalized.body || maybeString(n.body, 1000) || '',
         }),
         read: !!n.is_read,
       };
@@ -6366,6 +6370,104 @@ function repairMojibakeText(value) {
   } catch {
     return text;
   }
+}
+
+const NOTIF_TEXT_ENCODING_ISSUE_RE = /\u00C3|\u00C4|\u00C5|\u00E2|\u00D1|\u00D0|\uFFFD/;
+const NOTIF_TYPE_TR_PHRASE = Object.freeze({
+  NEW_INTEREST: 'ilan\u0131n\u0131za ba\u015Fvurdu',
+  NEW_MATCH: 'ile yeni bir e\u015Fle\u015Fme olu\u015Ftu!',
+  LISTING_MATCHED: 'ilan\u0131n\u0131zda e\u015Fle\u015Fme ger\u00E7ekle\u015Fti!',
+  RESPONSE_ACCEPTED: 'ba\u015Fvurunuzu kabul etti',
+  RESPONSE_REJECTED: 'ba\u015Fvurunuzu reddetti',
+  NEW_RATING: 'sizi de\u011Ferlendirdi',
+  MATCH_STATUS_CHANGED: 'ma\u00E7\u0131 oynad\u0131\u011F\u0131n\u0131 onaylad\u0131',
+  MATCH_REMINDER: 'ma\u00E7\u0131 oynad\u0131\u011F\u0131n\u0131 onaylad\u0131',
+  MATCH_COMPLETED: '\u2B50 Ma\u00E7 tamamland\u0131! De\u011Ferlendirme zaman\u0131',
+  MATCH_OTP_REQUESTED: 'do\u011Frulama kodu istedi',
+  NO_SHOW_WARNING: 'ma\u00E7a kat\u0131lmad\u0131 olarak i\u015Faretlendi',
+  FOLLOW_REQUEST: 'takip iste\u011Fi g\u00F6nderdi',
+  NEW_FOLLOWER: 'seni takip etmeye ba\u015Flad\u0131',
+  FOLLOW_ACCEPTED: 'takip iste\u011Finizi kabul etti',
+  DIRECT_CHALLENGE: 'sana spor teklifi g\u00F6nderdi',
+  NEW_MESSAGE: 'size mesaj g\u00F6nderdi',
+  POST_REACT: 'g\u00F6nderinize tepki verdi',
+  POST_LIKE: 'g\u00F6nderinizi be\u011Fendi',
+  POST_COMMENT: 'g\u00F6nderinize yorum yapt\u0131',
+  COMMENT_REPLY: 'yorumunuza yan\u0131t verdi',
+  COMMENT_LIKE: 'yorumunuzu be\u011Fendi',
+  QUOTA_FULL: '\uD83D\uDCCC \u0130lan kapasitesi doldu',
+});
+const NOTIF_TYPE_TR_TITLE_OVERRIDE = Object.freeze({
+  NEW_INTEREST: 'Yeni Ba\u015Fvuru',
+  NEW_MATCH: '\uD83D\uDD25 E\u015Fle\u015Fme Sa\u011Fland\u0131!',
+  RESPONSE_ACCEPTED: 'Ba\u015Fvurunuz kabul edildi!',
+  RESPONSE_REJECTED: 'Ba\u015Fvuru reddedildi',
+  MATCH_STATUS_CHANGED: '\u2753 Ma\u00E7\u0131 Oynad\u0131n\u0131z m\u0131?',
+  NO_SHOW_WARNING: '\u26A0\uFE0F Gelmedi Raporu',
+  FOLLOW_REQUEST: 'Takip iste\u011Fi',
+  NEW_FOLLOWER: 'Seni takip etmeye ba\u015Flad\u0131',
+  FOLLOW_ACCEPTED: 'Takip iste\u011Fin kabul edildi',
+  DIRECT_CHALLENGE: '\u2694\uFE0F Rakip Teklifi!',
+});
+const NOTIF_TYPE_TR_ACTOR_TYPES = new Set([
+  'NEW_INTEREST',
+  'NEW_MATCH',
+  'RESPONSE_ACCEPTED',
+  'RESPONSE_REJECTED',
+  'NEW_RATING',
+  'MATCH_STATUS_CHANGED',
+  'MATCH_REMINDER',
+  'MATCH_OTP_REQUESTED',
+  'NO_SHOW_WARNING',
+  'FOLLOW_REQUEST',
+  'NEW_FOLLOWER',
+  'FOLLOW_ACCEPTED',
+  'DIRECT_CHALLENGE',
+  'NEW_MESSAGE',
+  'POST_REACT',
+  'POST_LIKE',
+  'POST_COMMENT',
+  'COMMENT_REPLY',
+  'COMMENT_LIKE',
+]);
+
+function ensureSentence(text) {
+  if (!text) return '';
+  return /[.!?]$/.test(text) ? text : `${text}.`;
+}
+
+function normalizeNotificationTextForRepair({ type = '', title = '', body = '', senderName = '' }) {
+  const normalizedType = String(type || '').trim().toUpperCase();
+  const prevTitle = maybeString(title, 500) || '';
+  const prevBody = maybeString(body, 1000) || '';
+
+  let nextTitle = repairMojibakeText(prevTitle) || prevTitle;
+  let nextBody = repairMojibakeText(prevBody) || prevBody;
+
+  const titleBroken = NOTIF_TEXT_ENCODING_ISSUE_RE.test(nextTitle) || nextTitle.includes('\uFFFD');
+  const bodyBroken = NOTIF_TEXT_ENCODING_ISSUE_RE.test(nextBody) || nextBody.includes('\uFFFD');
+  const phrase = NOTIF_TYPE_TR_PHRASE[normalizedType] || '';
+  const sender = maybeString(senderName, 80) || 'Birisi';
+
+  if (titleBroken && phrase) {
+    nextTitle = NOTIF_TYPE_TR_TITLE_OVERRIDE[normalizedType] || phrase;
+  }
+
+  if (bodyBroken && phrase) {
+    if (normalizedType === 'DIRECT_CHALLENGE') {
+      nextBody = `${sender} sana spor teklifi g\u00F6nderdi.`;
+    } else if (NOTIF_TYPE_TR_ACTOR_TYPES.has(normalizedType)) {
+      nextBody = `${sender} ${ensureSentence(phrase)}`;
+    } else {
+      nextBody = phrase;
+    }
+  }
+
+  return {
+    title: nextTitle,
+    body: nextBody,
+    changed: nextTitle !== prevTitle || nextBody !== prevBody,
+  };
 }
 
 function hasBotTextEncodingIssue(value) {
@@ -8195,7 +8297,7 @@ adminStatsRouter.post('/push/repair-existing-notifications', async (req, res) =>
     const client = db.raw();
     let query = client
       .from('notifications')
-      .select('id,user_id,type,title,body,created_at')
+      .select('id,user_id,type,title,body,sender_name,created_at')
       .order('created_at', { ascending: false })
       .limit(limit);
 
@@ -8210,11 +8312,17 @@ adminStatsRouter.post('/push/repair-existing-notifications', async (req, res) =>
     const samples = [];
 
     for (const row of (data || [])) {
-      const nextTitle = repairMojibakeText(row.title) || maybeString(row.title, 500) || '';
-      const nextBody = repairMojibakeText(row.body) || maybeString(row.body, 1000) || '';
+      const normalized = normalizeNotificationTextForRepair({
+        type: row.type,
+        title: row.title,
+        body: row.body,
+        senderName: row.sender_name,
+      });
+      const nextTitle = normalized.title || '';
+      const nextBody = normalized.body || '';
       const prevTitle = maybeString(row.title, 500) || '';
       const prevBody = maybeString(row.body, 1000) || '';
-      const changed = nextTitle !== prevTitle || nextBody !== prevBody;
+      const changed = normalized.changed;
 
       if (!changed) continue;
 
