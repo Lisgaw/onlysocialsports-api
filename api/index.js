@@ -845,7 +845,7 @@ const DIRECT_CHALLENGE_COPY = Object.freeze({
   },
   es: {
     rivalTitle: '\u2694\uFE0F Oferta de rival!',
-    partnerTitle: '\uD83E\uDD1D Oferta de companero!',
+    partnerTitle: '\uD83E\uDD1D Oferta de compa\u00F1ero!',
     bodyTemplate: '{sender} te envio una oferta de {sport}.',
     senderFallback: 'Alguien',
     sportFallback: 'deporte',
@@ -853,14 +853,14 @@ const DIRECT_CHALLENGE_COPY = Object.freeze({
   fr: {
     rivalTitle: '\u2694\uFE0F Offre de rival!',
     partnerTitle: '\uD83E\uDD1D Offre de partenaire!',
-    bodyTemplate: '{sender} vous a envoye une offre de {sport}.',
+    bodyTemplate: '{sender} vous a envoy\u00E9 une offre de {sport}.',
     senderFallback: 'Quelqu\'un',
     sportFallback: 'sport',
   },
   pt: {
     rivalTitle: '\u2694\uFE0F Oferta de rival!',
     partnerTitle: '\uD83E\uDD1D Oferta de parceiro!',
-    bodyTemplate: '{sender} enviou uma oferta de {sport} para voce.',
+    bodyTemplate: '{sender} enviou uma oferta de {sport} para voc\u00EA.',
     senderFallback: 'Alguem',
     sportFallback: 'esporte',
   },
