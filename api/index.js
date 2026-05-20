@@ -7059,6 +7059,7 @@ ecosystemRouter.post('/repair-content', async (req, res) => {
         sportName: localizedSportName,
         cityName: bot.city || '',
         botId: bot.id,
+        totalMatches: bot.total_matches || 0,
       });
 
       const needsBioRepair = force
@@ -7100,6 +7101,7 @@ ecosystemRouter.post('/repair-content', async (req, res) => {
           locale,
           city: cityName,
           botId: bot.id,
+          totalMatches: bot.total_matches || 0,
         });
         const desiredDescription = botAutomation.generateListingDesc({
           name: bot.name,
@@ -7107,6 +7109,7 @@ ecosystemRouter.post('/repair-content', async (req, res) => {
           locale,
           city: cityName,
           botId: bot.id,
+          totalMatches: bot.total_matches || 0,
         });
 
         const needsListingRepair = force
@@ -7163,6 +7166,7 @@ ecosystemRouter.post('/repair-content', async (req, res) => {
               cityName: post.city_name || bot.city || '',
               botName: bot.name,
               botId: bot.id,
+              totalMatches: bot.total_matches || 0,
             })
           : {
               kind: 'SPORT',
@@ -7173,6 +7177,7 @@ ecosystemRouter.post('/repair-content', async (req, res) => {
                 cityName: post.city_name || bot.city || '',
                 botName: bot.name,
                 botId: bot.id,
+                totalMatches: bot.total_matches || 0,
               }),
             };
 
@@ -7679,8 +7684,8 @@ async function runEcosystemTick(eco) {
       await db.insert('listings', {
         id: listingId,
         type: lType,
-        title: botAutomation ? botAutomation.generateListingDesc({ name: bot.name, sport: localizedSportName, locale, city: eco.city_name, botId: bot.id }) : `${bot.name} - ${sport.name}`,
-        description: botAutomation ? botAutomation.generateListingDesc({ name: bot.name, sport: localizedSportName, locale, city: eco.city_name, botId: bot.id }) : null,
+        title: botAutomation ? botAutomation.generateListingDesc({ name: bot.name, sport: localizedSportName, locale, city: eco.city_name, botId: bot.id, totalMatches: bot.total_matches || 0 }) : `${bot.name} - ${sport.name}`,
+        description: botAutomation ? botAutomation.generateListingDesc({ name: bot.name, sport: localizedSportName, locale, city: eco.city_name, botId: bot.id, totalMatches: bot.total_matches || 0 }) : null,
         sport_id: sport.id, sport_name: localizedSportName,
         city_id: persistEcoCityId, city_name: eco.city_name,
         district_id: null, district_name: null,
@@ -7736,6 +7741,7 @@ async function runEcosystemTick(eco) {
             cityName: bot.city || eco.city_name,
             botName: bot.name,
             botId: bot.id,
+            totalMatches: bot.total_matches || 0,
           })
         : {
             kind: 'SPORT',
@@ -7746,6 +7752,7 @@ async function runEcosystemTick(eco) {
               cityName: bot.city || eco.city_name,
               botName: bot.name,
               botId: bot.id,
+              totalMatches: bot.total_matches || 0,
             }),
           };
       postRows.push({
@@ -7897,6 +7904,7 @@ async function runEcosystemTick(eco) {
               botId: bot.id,
               postId: post.id,
               attempt,
+              totalMatches: bot.total_matches || 0,
             });
             const signature = normalizeCommentSignature(candidate);
             if (!signature || usedForPost.has(signature)) continue;
