@@ -439,16 +439,16 @@ function buildBotPublicPersona({ botName, citySeed, countryCode, botIndex = 0, b
 }
 
 const REQUIRED_LISTING_SPORTS = [
-  { id: 'okey', name: 'Okey', icon: '�', category: 'Masa Sporları' },
-  { id: 'tavla', name: 'Tavla', icon: 'ğ���', category: 'Masa Sporları' },
-  { id: 'satranc', name: 'Satran�', icon: '♟️', category: 'Masa Sporları' },
-  { id: 'karting', name: 'Karting', icon: 'ğ���️', category: 'Motor Sporları' },
+  { id: 'okey', name: 'Okey', icon: '🀄', category: 'Masa Sporları' },
+  { id: 'tavla', name: 'Tavla', icon: '🎲', category: 'Masa Sporları' },
+  { id: 'satranc', name: 'Satranç', icon: '♟️', category: 'Masa Sporları' },
+  { id: 'karting', name: 'Karting', icon: '🏎️', category: 'Motor Sporları' },
 ];
 
 const SPORT_ICON_UPDATES = [
-  { id: 'hiking', icon: 'ğ���' },
-  { id: 'skateboarding', icon: 'ğ���' },
-  { id: 'okey', icon: '��' },
+  { id: 'hiking', icon: '🥾' },
+  { id: 'skateboarding', icon: '🛹' },
+  { id: 'okey', icon: '🀄' },
 ];
 
 let sportIconsEnsured = false;
@@ -2015,8 +2015,8 @@ async function generateMatchReminders({ now = new Date().toISOString(), limit = 
       await pushNotification({
         userId: recipient.userId,
         type: 'MATCH_REMINDER',
-        title: 'Ma� oynandı mı?',
-        body: `${recipient.sender?.name || 'Rakibin'} ile planlanan ma� zamanı ge�ti. Oynandıysa ma�ı onaylayın.`,
+        title: 'Maç oynandı mı?',
+        body: `${recipient.sender?.name || 'Rakibin'} ile planlanan maç zamanı geçti. Oynandıysa maçı onaylayın.`,
         relatedId: match.id,
         senderId: recipient.sender?.id,
         senderName: recipient.sender?.name,
@@ -2374,7 +2374,7 @@ authRouter.post('/login', async (req, res) => {
       loginAttempts.set(ip, att);
     }
     if (att.count >= LOGIN_MAX) {
-      return res.status(429).json({ message: '�ok fazla başarısız giriş. 15 dk bekleyin.' });
+      return res.status(429).json({ message: 'Çok fazla başarısız giriş. 15 dk bekleyin.' });
     }
 
     const user = await db.findOne('users', { email: email.toLowerCase() });
@@ -2436,10 +2436,10 @@ authRouter.post('/register', contentFilter('name'), async (req, res) => {
 authRouter.post('/token/refresh', async (req, res) => {
   try {
     const { refreshToken } = req.body;
-    if (!refreshToken) return res.status(401).json({ message: 'Ge�ersiz refresh token.' });
+    if (!refreshToken) return res.status(401).json({ message: 'Geçersiz refresh token.' });
 
     const stored = await db.findOne('refresh_tokens', { token: refreshToken });
-    if (!stored) return res.status(401).json({ message: 'Ge�ersiz refresh token.' });
+    if (!stored) return res.status(401).json({ message: 'Geçersiz refresh token.' });
 
     const payload = verifyRefreshToken(refreshToken);
     await db.removeWhere('refresh_tokens', { token: refreshToken }).catch(() => {});
@@ -2451,13 +2451,13 @@ authRouter.post('/token/refresh', async (req, res) => {
     }).catch(() => {});
 
     res.json(tokens);
-  } catch { res.status(401).json({ message: 'Refresh token s�resi dolmuş.' }); }
+  } catch { res.status(401).json({ message: 'Refresh token süresi dolmuş.' }); }
 });
 
 authRouter.post('/logout', authMiddleware, async (req, res) => {
   const { refreshToken } = req.body;
   if (refreshToken) await db.removeWhere('refresh_tokens', { token: refreshToken }).catch(() => {});
-  res.json({ message: '�ıkış yapıldı.' });
+  res.json({ message: 'Çıkış yapıldı.' });
 });
 
 // Password reset tokens stored in Supabase DB (NOT in-memory � serverless safe)
@@ -2782,7 +2782,7 @@ profileRouter.patch('/', contentFilter('name', 'bio', 'username'), async (req, r
       if (body[f] && typeof body[f] === 'string') {
         const lower = body[f].toLowerCase();
         if (blockedDomains.some(d => lower.includes(d))) {
-          return res.status(400).json({ message: 'Uygunsuz i�erik bağlantısı eklenemez.' });
+          return res.status(400).json({ message: 'Uygunsuz içerik bağlantısı eklenemez.' });
         }
       }
     }
@@ -2870,10 +2870,10 @@ profileRouter.patch('/', contentFilter('name', 'bio', 'username'), async (req, r
           const selectedSports = requestedSportIds
             .map(id => allSports.find(s => s.id === id))
             .filter(Boolean);
-          changes.sports = (selectedSports.length > 0 ? selectedSports : requestedSportIds.map(id => ({ id, name: id, icon: 'ğ���', category: null })))
+          changes.sports = (selectedSports.length > 0 ? selectedSports : requestedSportIds.map(id => ({ id, name: id, icon: '🏅', category: null })))
             .map(s => ({ id: s.id, name: s.name, icon: s.icon, category: s.category }));
         } catch {
-          changes.sports = requestedSportIds.map(id => ({ id, name: id, icon: 'ğ���', category: null }));
+          changes.sports = requestedSportIds.map(id => ({ id, name: id, icon: '🏅', category: null }));
         }
       }
     }
@@ -2885,7 +2885,7 @@ profileRouter.patch('/', contentFilter('name', 'bio', 'username'), async (req, r
     res.json({ data: { user: safeUser(user) } });
   } catch (e) {
     console.error('profile patch error:', e);
-    res.status(500).json({ message: e.message || 'Profil g�ncellenemedi.' });
+    res.status(500).json({ message: e.message || 'Profil güncellenemedi.' });
   }
 });
 
@@ -3119,7 +3119,7 @@ listingsRouter.get('/nearby', async (req, res) => {
     const userLatitude = toFiniteNumber(latitude);
     const userLongitude = toFiniteNumber(longitude);
     if (!isValidLatitude(userLatitude) || !isValidLongitude(userLongitude)) {
-      return res.status(400).json({ message: 'Ge�erli latitude ve longitude g�nderilmeli.' });
+      return res.status(400).json({ message: 'Geçerli latitude ve longitude gönderilmeli.' });
     }
 
     const radiusMeters = toFiniteNumber(radiusM);
@@ -3254,21 +3254,21 @@ listingsRouter.post('/', contentFilter('title', 'description'), async (req, res)
     if (!body.title || body.title.trim().length < 3)
       return res.status(400).json({ message: 'Başlık en az 3 karakter olmalı.' });
     if (!body.sportId)
-      return res.status(400).json({ message: 'Spor dalı se�ilmeli.' });
+      return res.status(400).json({ message: 'Spor dalı seçilmeli.' });
 
     // ── İlan tarih validasyonu: max 3 g�n sonrası ──
     const MAX_LISTING_DAYS = 3;
     if (body.dateTime || body.date) {
       const listingDate = new Date(body.dateTime || body.date);
       if (isNaN(listingDate.getTime()))
-        return res.status(400).json({ message: 'Ge�ersiz tarih formatı.' });
+        return res.status(400).json({ message: 'Geçersiz tarih formatı.' });
       const now = new Date();
       // Ge�miş tarih kontrol� (1 saat tolerans)
       if (listingDate.getTime() < now.getTime() - 3600000)
-        return res.status(400).json({ message: 'Ge�miş bir tarih i�in ilan a�ılamaz.' });
+        return res.status(400).json({ message: 'Geçmiş bir tarih için ilan açılamaz.' });
       const maxDate = new Date(now.getTime() + MAX_LISTING_DAYS * 24 * 3600 * 1000);
       if (listingDate > maxDate)
-        return res.status(400).json({ message: `İlan tarihi en fazla ${MAX_LISTING_DAYS} g�n sonrası olabilir.` });
+        return res.status(400).json({ message: `İlan tarihi en fazla ${MAX_LISTING_DAYS} gün sonrası olabilir.` });
     }
 
     const sport = await db.findById('sports', body.sportId);
@@ -3280,13 +3280,13 @@ listingsRouter.post('/', contentFilter('title', 'description'), async (req, res)
       && String(body.longitude).trim() !== '';
 
     if (hasLatitudeInput !== hasLongitudeInput) {
-      return res.status(400).json({ message: 'latitude ve longitude birlikte g�nderilmeli.' });
+      return res.status(400).json({ message: 'latitude ve longitude birlikte gönderilmeli.' });
     }
 
     const latitude = hasLatitudeInput ? toFiniteNumber(body.latitude) : null;
     const longitude = hasLongitudeInput ? toFiniteNumber(body.longitude) : null;
     if (hasLatitudeInput && (!isValidLatitude(latitude) || !isValidLongitude(longitude))) {
-      return res.status(400).json({ message: 'Ge�ersiz konum koordinatları.' });
+      return res.status(400).json({ message: 'Geçersiz konum koordinatları.' });
     }
     // NOTE: city_id and district_id have FK constraints to cities/districts tables
     // Flutter sends numeric IDs from states.json (e.g. "2170") but DB has "c1" format
@@ -3459,7 +3459,7 @@ listingsRouter.patch('/:id/interests/:responseId', async (req, res) => {
         userId: interest.user_id,
         type: 'QUOTA_FULL',
         title: 'Kontenjan doldu',
-        body: 'İlanın kontenjanı dolduğu i�in başvurunuz otomatik reddedildi.',
+        body: 'İlanın kontenjanı dolduğu için başvurunuz otomatik reddedildi.',
         relatedId: listing.id,
         senderId: req.userId,
       });
@@ -3489,7 +3489,7 @@ listingsRouter.patch('/:id/interests/:responseId', async (req, res) => {
 
         if ((ownerConflict.count || 0) > 0 || (applicantConflict.count || 0) > 0) {
           return res.status(409).json({
-            message: 'Bu tarih ve saatte mevcut bir eşleşme var. L�tfen farklı bir zaman se�in.',
+            message: 'Bu tarih ve saatte mevcut bir eşleşme var. Lütfen farklı bir zaman seçin.',
           });
         }
       }
@@ -3592,7 +3592,7 @@ listingsRouter.patch('/:id/interests/:responseId', async (req, res) => {
             userId: pending.user_id,
             type: 'QUOTA_FULL',
             title: 'Kontenjan doldu',
-            body: 'İlan kontenjanı dolduğu i�in başvurunuz otomatik reddedildi.',
+            body: 'İlan kontenjanı dolduğu için başvurunuz otomatik reddedildi.',
             relatedId: listing.id,
             senderId: req.userId,
           });
@@ -3621,8 +3621,8 @@ listingsRouter.patch('/:id/interests/:responseId', async (req, res) => {
             type: 'NEW_MATCH',
             title: 'İlanın kotası tamamlandı',
             body: participantLabel
-              ? `${participantLabel} ${sportLabel} i�in eşleştiler.`
-              : `İlanın kontenjanı doldu. ${sportLabel} i�in grup eşleşmesi tamamlandı.`,
+              ? `${participantLabel} ${sportLabel} için eşleştiler.`
+              : `İlanın kontenjanı doldu. ${sportLabel} için grup eşleşmesi tamamlandı.`,
             relatedId: groupMatch.id,
             link: matchLink,
             senderId: req.userId,
@@ -3689,7 +3689,7 @@ listingsRouter.delete('/:id', async (req, res) => {
 listingsRouter.delete('/:id/interest', async (req, res) => {
   try {
     await db.removeWhere('interests', { listing_id: req.params.id, user_id: req.userId });
-    res.json({ message: 'Başvuru geri �ekildi.' });
+    res.json({ message: 'Başvuru geri çekildi.' });
   } catch (e) { res.status(500).json({ message: e.message }); }
 });
 
@@ -3884,11 +3884,11 @@ matchesRouter.get('/', async (req, res) => {
 matchesRouter.get('/:id', async (req, res) => {
   try {
     const m = await db.findById('matches', req.params.id);
-    if (!m) return res.status(404).json({ message: 'Ma� bulunamadı.' });
+    if (!m) return res.status(404).json({ message: 'Maç bulunamadı.' });
     const listing = m.listing_id ? await listingById(m.listing_id) : null;
     const participantIds = await getMatchParticipantIds(m, listing);
     if (!participantIds.includes(req.userId)) {
-      return res.status(403).json({ message: 'Bu ma�ın katılımcısı değilsiniz.' });
+      return res.status(403).json({ message: 'Bu maçın katılımcısı değilsiniz.' });
     }
 
     const displayUser2Id = pickDisplayUser2IdForViewer({
@@ -3938,12 +3938,12 @@ matchesRouter.get('/:id', async (req, res) => {
 matchesRouter.post('/:id/complete', async (req, res) => {
   try {
     const m = await db.findById('matches', req.params.id);
-    if (!m) return res.status(404).json({ message: 'Ma� bulunamadı.' });
+    if (!m) return res.status(404).json({ message: 'Maç bulunamadı.' });
 
     const listing = m.listing_id ? await listingById(m.listing_id) : null;
     const participantIds = await getMatchParticipantIds(m, listing);
     if (!participantIds.includes(req.userId)) {
-      return res.status(403).json({ message: 'Bu ma�ın katılımcısı değilsiniz.' });
+      return res.status(403).json({ message: 'Bu maçın katılımcısı değilsiniz.' });
     }
 
     const updated = await db.update('matches', m.id, { status: 'COMPLETED', completed_at: new Date().toISOString() });
@@ -3954,14 +3954,14 @@ matchesRouter.post('/:id/complete', async (req, res) => {
 matchesRouter.patch('/:id/approve', async (req, res) => {
   try {
     const m = await db.findById('matches', req.params.id);
-    if (!m) return res.status(404).json({ message: 'Ma� bulunamadı.' });
+    if (!m) return res.status(404).json({ message: 'Maç bulunamadı.' });
     if (m.status === 'COMPLETED' || m.status === 'CANCELLED') return res.json({ data: toCamel(m) });
 
     const listing = m.listing_id ? await listingById(m.listing_id) : null;
     const participantIds = await getMatchParticipantIds(m, listing);
     const participantSet = new Set(participantIds);
     if (!participantSet.has(req.userId)) {
-      return res.status(403).json({ message: 'Bu ma�ın katılımcısı değilsiniz.' });
+      return res.status(403).json({ message: 'Bu maçın katılımcısı değilsiniz.' });
     }
 
     const isGroupMatch = isGroupMatchRecord(m, listing);
@@ -3999,8 +3999,8 @@ matchesRouter.patch('/:id/approve', async (req, res) => {
           type: 'MATCH_COMPLETED',
           title: '⭐ Değerlendirme Zamanı!',
           body: isGroupMatch
-            ? 'Grup ma�ı tamamlandı. Partnerlerini değerlendirebilirsin.'
-            : `${approver?.name || 'Rakibin'} ma�ı oynadığını onayladı`,
+            ? 'Grup maçı tamamlandı. Partnerlerini değerlendirebilirsin.'
+            : `${approver?.name || 'Rakibin'} maçı oynadığını onayladı`,
           relatedId: m.id,
           senderId: req.userId,
           senderName: approver?.name,
@@ -4027,8 +4027,8 @@ matchesRouter.patch('/:id/approve', async (req, res) => {
         await pushNotification({
           userId: awaitingId,
           type: 'MATCH_STATUS_CHANGED',
-          title: '⚽ Ma�ı Oynadınız mı?',
-          body: `${approver?.name || 'Rakibin'} ma�ı oynadığını onayladı`,
+          title: '⚽ Maçı Oynadınız mı?',
+          body: `${approver?.name || 'Rakibin'} maçı oynadığını onayladı`,
           relatedId: m.id,
           senderId: req.userId,
           senderName: approver?.name,
@@ -4045,16 +4045,16 @@ matchesRouter.patch('/:id/approve', async (req, res) => {
 matchesRouter.post('/:id/otp/request', async (req, res) => {
   try {
     const m = await db.findById('matches', req.params.id);
-    if (!m) return res.status(404).json({ message: 'Ma� bulunamadı.' });
+    if (!m) return res.status(404).json({ message: 'Maç bulunamadı.' });
 
     const listing = m.listing_id ? await listingById(m.listing_id) : null;
     const participantIds = await getMatchParticipantIds(m, listing);
     const participantSet = new Set(participantIds);
     if (!participantSet.has(req.userId))
-      return res.status(403).json({ message: 'Bu ma�ın katılımcısı değilsiniz.' });
+      return res.status(403).json({ message: 'Bu maçın katılımcısı değilsiniz.' });
 
     if (m.status === 'COMPLETED' || m.status === 'CANCELLED') {
-      return res.status(400).json({ message: 'Bu ma� i�in OTP g�nderilemez.' });
+      return res.status(400).json({ message: 'Bu maç için OTP gönderilemez.' });
     }
 
     const code = String(Math.floor(100000 + Math.random() * 900000));
@@ -4073,8 +4073,8 @@ matchesRouter.post('/:id/otp/request', async (req, res) => {
     if (otherId) {
       await pushNotification({
         userId: otherId, type: 'MATCH_OTP_REQUESTED',
-        title: 'ğ��� Doğrulama Kodu İstendi',
-        body: `${requester?.name || 'Rakibin'} ma� doğrulaması i�in kod istedi.`,
+        title: '🔐 Doğrulama Kodu İstendi',
+        body: `${requester?.name || 'Rakibin'} maç doğrulaması için kod istedi.`,
         relatedId: m.id, senderId: req.userId,
       });
     }
@@ -4089,12 +4089,12 @@ matchesRouter.post('/:id/otp/verify', async (req, res) => {
     if (!code) return res.status(400).json({ message: 'Doğrulama kodu gerekli.' });
 
     const m = await db.findById('matches', req.params.id);
-    if (!m) return res.status(404).json({ message: 'Ma� bulunamadı.' });
+    if (!m) return res.status(404).json({ message: 'Maç bulunamadı.' });
 
     const listing = m.listing_id ? await listingById(m.listing_id) : null;
     const participantIds = await getMatchParticipantIds(m, listing);
     if (!participantIds.includes(req.userId)) {
-      return res.status(403).json({ message: 'Bu ma�ın katılımcısı değilsiniz.' });
+      return res.status(403).json({ message: 'Bu maçın katılımcısı değilsiniz.' });
     }
 
     const client = db.raw();
@@ -4104,12 +4104,12 @@ matchesRouter.post('/:id/otp/verify', async (req, res) => {
       .limit(1);
 
     const otp = otps?.[0];
-    if (!otp) return res.status(400).json({ message: 'Ge�ersiz veya s�resi dolmuş doğrulama kodu.' });
+    if (!otp) return res.status(400).json({ message: 'Geçersiz veya süresi dolmuş doğrulama kodu.' });
 
     await db.update('otps', otp.id, { used_at: new Date().toISOString() });
     const newTrust = Math.min(100, (m.trust_score || 0) + 40);
     await db.update('matches', m.id, { trust_score: newTrust });
-    res.json({ message: 'Ma� doğrulandı.', trustScore: newTrust });
+    res.json({ message: 'Maç doğrulandı.', trustScore: newTrust });
   } catch (e) { res.status(500).json({ message: e.message }); }
 });
 
@@ -4119,27 +4119,27 @@ matchesRouter.post('/:id/gps/verify', async (req, res) => {
     const longitude = toFiniteNumber(req.body?.longitude);
 
     if (!isValidLatitude(latitude) || !isValidLongitude(longitude)) {
-      return res.status(400).json({ message: 'Ge�erli enlem ve boylam gerekli.' });
+      return res.status(400).json({ message: 'Geçerli enlem ve boylam gerekli.' });
     }
 
     const m = await db.findById('matches', req.params.id);
-    if (!m) return res.status(404).json({ message: 'Ma� bulunamadı.' });
+    if (!m) return res.status(404).json({ message: 'Maç bulunamadı.' });
 
     const listing = m.listing_id ? await listingById(m.listing_id) : null;
     const participantIds = await getMatchParticipantIds(m, listing);
     if (!participantIds.includes(req.userId)) {
-      return res.status(403).json({ message: 'Bu ma�ın katılımcısı değilsiniz.' });
+      return res.status(403).json({ message: 'Bu maçın katılımcısı değilsiniz.' });
     }
 
     if (!hasMatchLocationVerificationsTable) {
-      return res.status(503).json({ message: 'GPS doğrulama altyapısı hazır değil. Migration �alıştırılmalı.' });
+      return res.status(503).json({ message: 'GPS doğrulama altyapısı hazır değil. Migration çalıştırılmalı.' });
     }
 
     const nowIso = new Date().toISOString();
 
     let verificationRows = (await getMatchLocationVerificationRows([m.id])).get(m.id) || [];
     if (!hasMatchLocationVerificationsTable) {
-      return res.status(503).json({ message: 'GPS doğrulama altyapısı hazır değil. Migration �alıştırılmalı.' });
+      return res.status(503).json({ message: 'GPS doğrulama altyapısı hazır değil. Migration çalıştırılmalı.' });
     }
 
     const existing = verificationRows.find(row => row.user_id === req.userId);
@@ -4201,7 +4201,7 @@ matchesRouter.post('/:id/gps/verify', async (req, res) => {
   } catch (e) {
     if (isMissingRelationError(e, 'match_location_verifications')) {
       hasMatchLocationVerificationsTable = false;
-      return res.status(503).json({ message: 'GPS doğrulama altyapısı hazır değil. Migration �alıştırılmalı.' });
+      return res.status(503).json({ message: 'GPS doğrulama altyapısı hazır değil. Migration çalıştırılmalı.' });
     }
     res.status(500).json({ message: e.message });
   }
@@ -4210,15 +4210,15 @@ matchesRouter.post('/:id/gps/verify', async (req, res) => {
 matchesRouter.post('/:id/noshow', async (req, res) => {
   try {
     const m = await db.findById('matches', req.params.id);
-    if (!m) return res.status(404).json({ message: 'Ma� bulunamadı.' });
+    if (!m) return res.status(404).json({ message: 'Maç bulunamadı.' });
 
     const listing = m.listing_id ? await listingById(m.listing_id) : null;
     const participantIds = await getMatchParticipantIds(m, listing);
     if (!participantIds.includes(req.userId))
-      return res.status(403).json({ message: 'Bu ma�ın katılımcısı değilsiniz.' });
+      return res.status(403).json({ message: 'Bu maçın katılımcısı değilsiniz.' });
 
     const already = await db.findOne('noshows', { match_id: m.id, reporter_id: req.userId });
-    if (already) return res.status(409).json({ message: 'Bu ma� i�in zaten rapor ettiniz.' });
+    if (already) return res.status(409).json({ message: 'Bu maç için zaten rapor ettiniz.' });
 
     let reportedId = req.userId === m.user1_id ? m.user2_id : m.user1_id;
     if (req.userId === m.user1_id && isGroupMatchRecord(m, listing)) {
@@ -4234,7 +4234,7 @@ matchesRouter.post('/:id/noshow', async (req, res) => {
     await pushNotification({
       userId: reportedId, type: 'NO_SHOW_WARNING',
       title: '⚠️ Gelmedi Raporu',
-      body: `${reporter?.name || 'Rakibin'} ma�a gelmediğinizi bildirdi.`,
+      body: `${reporter?.name || 'Rakibin'} maça gelmediğinizi bildirdi.`,
       relatedId: m.id, senderId: req.userId,
     });
     res.json({ message: 'Rapor kaydedildi.' });
@@ -4357,7 +4357,7 @@ convsRouter.post('/:id/messages', contentFilter('content'), async (req, res) => 
   try {
     const { content } = req.body;
     if (!content || content.trim().length < 1)
-      return res.status(400).json({ message: 'Mesaj i�eriği gerekli.' });
+      return res.status(400).json({ message: 'Mesaj içeriği gerekli.' });
     const conv = await db.findById('conversations', req.params.id);
     if (!conv) return res.status(404).json({ message: 'Konuşma bulunamadı.' });
     if (conv.user1_id !== req.userId && conv.user2_id !== req.userId) {
@@ -4385,7 +4385,7 @@ convsRouter.post('/:id/messages', contentFilter('content'), async (req, res) => 
       userId: otherUserId,
       type: 'NEW_MESSAGE',
       title: 'Yeni mesaj',
-      body: `${sender?.name || 'Birisi'} size mesaj g�nderdi.`,
+      body: `${sender?.name || 'Birisi'} size mesaj gönderdi.`,
       relatedId: req.params.id,
       senderId: req.userId,
       senderName: sender?.name,
@@ -4591,13 +4591,13 @@ usersRouter.get('/:id/following', async (req, res) => {
 usersRouter.delete('/:id/followers', async (req, res) => {
   try {
     const f = await db.findOne('follows', { follower_id: req.params.id, following_id: req.userId, status: 'accepted' });
-    if (!f) return res.status(404).json({ message: 'Takip�i bulunamadı.' });
+    if (!f) return res.status(404).json({ message: 'Takipçi bulunamadı.' });
     await db.remove('follows', f.id);
     const me = await userById(req.userId);
     const follower = await userById(req.params.id);
     if (me) await db.update('users', req.userId, { follower_count: Math.max(0, (me.follower_count || 1) - 1) });
     if (follower) await db.update('users', req.params.id, { following_count: Math.max(0, (follower.following_count || 1) - 1) });
-    res.json({ message: 'Takip�i kaldırıldı.' });
+    res.json({ message: 'Takipçi kaldırıldı.' });
   } catch (e) { res.status(500).json({ message: e.message }); }
 });
 
@@ -4781,13 +4781,13 @@ challengesRouter.post('/', contentFilter('message'), async (req, res) => {
   try {
     const { targetId, sportId } = req.body;
     if (!targetId || !sportId) return res.status(400).json({ message: 'Hedef kullanıcı ve spor gerekli.' });
-    if (targetId === req.userId) return res.status(400).json({ message: 'Kendinize teklif g�nderemezsiniz.' });
+    if (targetId === req.userId) return res.status(400).json({ message: 'Kendinize teklif gönderemezsiniz.' });
 
     const target = await userById(targetId);
     if (!target) return res.status(404).json({ message: 'Kullanıcı bulunamadı.' });
 
     const dup = await db.findOne('challenges', { sender_id: req.userId, target_id: targetId, sport_id: sportId, status: 'PENDING' });
-    if (dup) return res.status(409).json({ message: 'Bu spor i�in zaten bekleyen bir teklifiniz var.' });
+    if (dup) return res.status(409).json({ message: 'Bu spor için zaten bekleyen bir teklifiniz var.' });
 
     const challenge = {
       id: uuid(), sender_id: req.userId, target_id: targetId,
@@ -4837,7 +4837,7 @@ challengesRouter.patch('/:id', async (req, res) => {
 
     const action = String(req.body.action || '').toUpperCase();
     if (action !== 'ACCEPTED' && action !== 'REJECTED')
-      return res.status(400).json({ message: 'Ge�ersiz işlem.' });
+      return res.status(400).json({ message: 'Geçersiz işlem.' });
 
     await db.update('challenges', c.id, { status: action });
 
@@ -4873,7 +4873,7 @@ challengesRouter.patch('/:id', async (req, res) => {
 
       await pushNotification({
         userId: c.sender_id, type: 'NEW_MATCH',
-        title: 'ğ��� Eşleşme Sağlandı!',
+        title: '🎮 Eşleşme Sağlandı!',
         body: `${accepter?.name || 'Birisi'} teklifinizi kabul etti.`,
         relatedId: matchId, senderId: req.userId,
         senderName: accepter?.name, senderAvatar: accepter?.avatar_url,
@@ -5028,7 +5028,7 @@ postsRouter.post('/', contentFilter('content', 'title'), async (req, res) => {
     const body = sanitize(req.body);
     const postType = body.postType === 'SOCIAL_LISTING' ? 'SOCIAL_LISTING' : 'POST';
     if (!body.content || body.content.trim().length < 1)
-      return res.status(400).json({ message: 'İ�erik gerekli.' });
+      return res.status(400).json({ message: 'İçerik gerekli.' });
 
     const user = await userById(req.userId);
     const sport = body.sportId ? await db.findById('sports', body.sportId) : null;
@@ -5077,7 +5077,7 @@ postsRouter.get('/user/:userId', async (req, res) => {
     }
 
     const postIds = posts.map(p => p.id);
-    const user = await userById(req.params.userId); // Single user � just one query
+    const user = await userById(req.params.userId); // Single user - just one query
 
     const [reactionsData, commentsData] = await Promise.all([
       client.from('post_reactions').select('post_id,user_id,type').in('post_id', postIds).then(r => r.data || []),
@@ -5109,7 +5109,7 @@ postsRouter.get('/user/:userId', async (req, res) => {
 postsRouter.get('/:id', async (req, res) => {
   try {
     const post = await db.findById('posts', req.params.id);
-    if (!post) return res.status(404).json({ message: 'G�nderi bulunamadı.' });
+    if (!post) return res.status(404).json({ message: 'Gönderi bulunamadı.' });
     const author = await userById(post.user_id);
     const commentCount = await db.count('comments', { post_id: post.id });
     const rd = await enrichPostReactions(post.id, req.userId);
@@ -5127,7 +5127,7 @@ postsRouter.get('/:id', async (req, res) => {
 postsRouter.delete('/:id', async (req, res) => {
   try {
     const post = await db.findById('posts', req.params.id);
-    if (!post) return res.status(404).json({ message: 'G�nderi bulunamadı.' });
+    if (!post) return res.status(404).json({ message: 'Gönderi bulunamadı.' });
     if (post.user_id !== req.userId) return res.status(403).json({ message: 'Yetkiniz yok.' });
     await db.removeWhere('post_reactions', { post_id: post.id });
     const comments = await db.query('comments', { filters: { post_id: post.id } });
@@ -5141,11 +5141,11 @@ postsRouter.delete('/:id', async (req, res) => {
 postsRouter.put('/:id', contentFilter('content'), async (req, res) => {
   try {
     const post = await db.findById('posts', req.params.id);
-    if (!post) return res.status(404).json({ message: 'G�nderi bulunamadı.' });
+    if (!post) return res.status(404).json({ message: 'Gönderi bulunamadı.' });
     if (post.user_id !== req.userId) return res.status(403).json({ message: 'Yetkiniz yok.' });
     const { content } = req.body;
     if (!content || content.trim().length === 0)
-      return res.status(400).json({ message: 'İ�erik boş olamaz.' });
+      return res.status(400).json({ message: 'İçerik boş olamaz.' });
     const updated = await db.update('posts', post.id, { content: content.trim(), updated_at: new Date().toISOString() });
     const user = await userById(post.user_id);
     const commentCount = await db.count('comments', { post_id: post.id });
@@ -5163,9 +5163,9 @@ postsRouter.put('/:id', contentFilter('content'), async (req, res) => {
 postsRouter.post('/:id/react', async (req, res) => {
   try {
     const post = await db.findById('posts', req.params.id);
-    if (!post) return res.status(404).json({ message: 'G�nderi bulunamadı.' });
+    if (!post) return res.status(404).json({ message: 'Gönderi bulunamadı.' });
     const { type = 'LIKE' } = req.body;
-    if (!REACTION_TYPES.includes(type)) return res.status(400).json({ message: 'Ge�ersiz reaksiyon tipi.' });
+    if (!REACTION_TYPES.includes(type)) return res.status(400).json({ message: 'Geçersiz reaksiyon tipi.' });
 
     const existing = await db.findOne('post_reactions', { post_id: post.id, user_id: req.userId });
     if (existing) {
@@ -5177,8 +5177,8 @@ postsRouter.post('/:id/react', async (req, res) => {
         const reactor = await userById(req.userId);
         await pushNotification({
           userId: post.user_id, type: 'POST_REACT',
-          title: 'G�nderi Reaksiyonu',
-          body: `${reactor?.name || 'Birisi'} g�nderinize tepki verdi.`,
+          title: 'Gönderi Reaksiyonu',
+          body: `${reactor?.name || 'Birisi'} gönderinize tepki verdi.`,
           relatedId: post.id, senderId: req.userId,
           senderName: reactor?.name, senderAvatar: reactor?.avatar_url,
         });
@@ -5191,7 +5191,7 @@ postsRouter.post('/:id/react', async (req, res) => {
 postsRouter.post('/:id/like', async (req, res) => {
   try {
     const post = await db.findById('posts', req.params.id);
-    if (!post) return res.status(404).json({ message: 'G�nderi bulunamadı.' });
+    if (!post) return res.status(404).json({ message: 'Gönderi bulunamadı.' });
     const existing = await db.findOne('post_reactions', { post_id: post.id, user_id: req.userId });
     if (existing) { await db.remove('post_reactions', existing.id); }
     else { await db.insert('post_reactions', { id: uuid(), post_id: post.id, user_id: req.userId, type: 'LIKE' }); }
@@ -5265,17 +5265,17 @@ postsRouter.get('/:id/comments', async (req, res) => {
 postsRouter.post('/:id/comments', contentFilter('content'), async (req, res) => {
   try {
     const post = await db.findById('posts', req.params.id);
-    if (!post) return res.status(404).json({ message: 'G�nderi bulunamadı.' });
+    if (!post) return res.status(404).json({ message: 'Gönderi bulunamadı.' });
     const body = sanitize(req.body);
     if (!body.content || body.content.trim().length < 1)
-      return res.status(400).json({ message: 'Yorum i�eriği gerekli.' });
+      return res.status(400).json({ message: 'Yorum içeriği gerekli.' });
     if (body.content.length > 2000)
       return res.status(400).json({ message: 'Yorum en fazla 2000 karakter olabilir.' });
 
     // Validate parentId
     if (body.parentId) {
       const parent = await db.findById('comments', body.parentId);
-      if (!parent || parent.post_id !== post.id) return res.status(404).json({ message: '�st yorum bulunamadı.' });
+      if (!parent || parent.post_id !== post.id) return res.status(404).json({ message: 'Üst yorum bulunamadı.' });
     }
 
     const user = await userById(req.userId);
@@ -5293,7 +5293,7 @@ postsRouter.post('/:id/comments', contentFilter('content'), async (req, res) => 
         userId: notifyUserId,
         type: body.parentId ? 'COMMENT_REPLY' : 'POST_COMMENT',
         title: body.parentId ? 'Yorumunuza yanıt' : 'Yeni yorum',
-        body: `${user?.name || 'Birisi'} ${body.parentId ? 'yorumunuza yanıt verdi.' : 'g�nderinize yorum yaptı.'}`,
+        body: `${user?.name || 'Birisi'} ${body.parentId ? 'yorumunuza yanıt verdi.' : 'gönderinize yorum yaptı.'}`,
         relatedId: post.id, senderId: req.userId,
       });
     }
@@ -5337,7 +5337,7 @@ postsRouter.put('/:postId/comments/:commentId', contentFilter('content'), async 
     if (comment.user_id !== req.userId) return res.status(403).json({ message: 'Yetkiniz yok.' });
     const { content } = req.body;
     if (!content || content.trim().length === 0)
-      return res.status(400).json({ message: 'İ�erik boş olamaz.' });
+      return res.status(400).json({ message: 'İçerik boş olamaz.' });
     const updated = await db.update('comments', comment.id, { content: content.trim(), updated_at: new Date().toISOString() });
     const user = await userById(comment.user_id);
     const likeCount = await db.count('comment_likes', { comment_id: comment.id });
@@ -5734,8 +5734,8 @@ app.get('/api/cron/cleanup-expired', async (req, res) => {
           type: 'RESPONSE_REJECTED',
           title: 'Başvuru otomatik reddedildi',
           body: targetListing?.title
-            ? `"${targetListing.title}" ilanının s�resi dolduğu i�in başvurunuz otomatik reddedildi.`
-            : 'İlanın s�resi dolduğu i�in başvurunuz otomatik reddedildi.',
+            ? `"${targetListing.title}" ilanının süresi dolduğu için başvurunuz otomatik reddedildi.`
+            : 'İlanın süresi dolduğu için başvurunuz otomatik reddedildi.',
           relatedId: interest.listing_id,
           senderId: targetListing?.user_id || null,
         }).catch(() => {});
@@ -5841,7 +5841,7 @@ app.get('/api/recommendations', authMiddleware, async (req, res) => {
     const items = listings.map(l => ({
       id: uuid(), type: 'listing', listing: toCamel(l), createdAt: l.created_at,
     }));
-    res.json({ data: items, reason: 'Spor tercihlerinize g�re' });
+    res.json({ data: items, reason: 'Spor tercihlerinize göre' });
   } catch (e) { res.status(500).json({ message: e.message }); }
 });
 
@@ -6116,13 +6116,13 @@ app.post('/api/ratings', authMiddleware, async (req, res) => {
     if (isNaN(s) || s < 1 || s > 5) return res.status(400).json({ message: 'Puan 1-5 arasında olmalı.' });
 
     const m = await db.findById('matches', matchId);
-    if (!m) return res.status(404).json({ message: 'Ma� bulunamadı.' });
-    if (m.status !== 'COMPLETED') return res.status(400).json({ message: 'Yalnızca tamamlanan ma�lar değerlendirilebilir.' });
+    if (!m) return res.status(404).json({ message: 'Maç bulunamadı.' });
+    if (m.status !== 'COMPLETED') return res.status(400).json({ message: 'Yalnızca tamamlanan maçlar değerlendirilebilir.' });
 
     const listing = await listingById(m.listing_id);
     const participantIds = await getMatchParticipantIds(m, listing);
     const isGroupMatch = isGroupMatchRecord(m, listing);
-    if (!participantIds.includes(req.userId)) return res.status(403).json({ message: 'Bu ma�ın katılımcısı değilsiniz.' });
+    if (!participantIds.includes(req.userId)) return res.status(403).json({ message: 'Bu maçın katılımcısı değilsiniz.' });
 
     let rateeId;
     if (isGroupMatch) {
@@ -6138,7 +6138,7 @@ app.post('/api/ratings', authMiddleware, async (req, res) => {
     }
 
     if (!rateeId || rateeId === req.userId) {
-      return res.status(400).json({ message: 'Ge�erli bir değerlendirme hedefi bulunamadı.' });
+      return res.status(400).json({ message: 'Geçerli bir değerlendirme hedefi bulunamadı.' });
     }
 
     const sportId = listing?.sport_id || null;
@@ -6173,7 +6173,7 @@ app.post('/api/ratings', authMiddleware, async (req, res) => {
         await db.update('users', rateeId, { average_rating: newAvg, rating_count: allRatings.length });
       }
 
-      return res.json({ message: 'Değerlendirme g�ncellendi.', updated: true });
+      return res.json({ message: 'Değerlendirme güncellendi.', updated: true });
     }
 
     // NEW rating
@@ -6195,7 +6195,7 @@ app.post('/api/ratings', authMiddleware, async (req, res) => {
       const errMsg = String(insertErr?.message || '');
       if (isGroupMatch && /(ratings_match_id_rater_id_key|match_id.*rater_id)/i.test(errMsg)) {
         return res.status(409).json({
-          message: 'Grup ma�ında birden fazla partner değerlendirebilmek i�in ratings migrationı gerekli (005_ratings_group_unique.sql).',
+          message: 'Grup maçında birden fazla partner değerlendirebilmek için ratings migrationı gerekli (005_ratings_group_unique.sql).',
         });
       }
       throw insertErr;
@@ -6238,12 +6238,12 @@ async function handlePushToken(req, res) {
     });
 
     if (action !== 'register' && action !== 'unregister') {
-      return res.status(400).json({ message: 'Ge�ersiz action. register veya unregister olmalı.' });
+      return res.status(400).json({ message: 'Geçersiz action. register veya unregister olmalı.' });
     }
 
     if (action === 'register') {
       if (!token || token.length < 20) {
-        return res.status(400).json({ message: 'Ge�ersiz push token.' });
+        return res.status(400).json({ message: 'Geçersiz push token.' });
       }
 
       const result = await upsertPushToken({
@@ -6264,7 +6264,7 @@ async function handlePushToken(req, res) {
 
       if (!result.stored && result.reason === 'missing_table') {
         return res.status(202).json({
-          message: 'Push token alındı fakat push_tokens tablosu hen�z oluşturulmamış.',
+          message: 'Push token alındı fakat push_tokens tablosu henüz oluşturulmamış.',
         });
       }
 
@@ -6288,7 +6288,7 @@ async function handlePushToken(req, res) {
     }
 
     return res.json({
-      message: token ? 'Push token kaldırıldı.' : 'T�m push tokenlar kaldırıldı.',
+      message: token ? 'Push token kaldırıldı.' : 'Tüm push tokenlar kaldırıldı.',
     });
   } catch (e) {
     console.error('push token error:', e);
@@ -6680,10 +6680,10 @@ ecosystemRouter.post('/', async (req, res) => {
     } = req.body;
 
     if (scope === 'CITY' && (!cityId || !cityName)) {
-      return res.status(400).json({ message: 'Şehir se�ilmeli (cityId, cityName).' });
+      return res.status(400).json({ message: 'Şehir seçilmeli (cityId, cityName).' });
     }
     if ((scope === 'CITY' || scope === 'COUNTRY') && !countryCode) {
-      return res.status(400).json({ message: '�lke kodu gerekli (countryCode).' });
+      return res.status(400).json({ message: 'Ülke kodu gerekli (countryCode).' });
     }
 
     // botsPerGroup * groupsPerCity = total bots per city (if botsPerGroup sent from Flutter)
@@ -6779,7 +6779,7 @@ ecosystemRouter.post('/', async (req, res) => {
       const femalePct = 0.7;
       const femaleCount = Math.round(perCity * femalePct);
       const botRows = [];
-      const botMeta = []; // id/name/gender/sportId bilgisi listings i�in
+      const botMeta = []; // id/name/gender/sportId bilgisi listings için
 
       const nowMs = Date.now();
       for (let i = 0; i < perCity; i++) {
@@ -7309,7 +7309,7 @@ ecosystemRouter.post('/:id/toggle-bots-privacy', async (req, res) => {
       await db.update('users', bot.id, { is_private: !!isPrivate });
       updated++;
     }
-    res.json({ message: `${updated} bot profili ${isPrivate ? 'gizli' : 'herkese a�ık'} yapıldı.` });
+    res.json({ message: `${updated} bot profili ${isPrivate ? 'gizli' : 'herkese açık'} yapıldı.` });
   } catch (e) { res.status(500).json({ message: e.message }); }
 });
 
@@ -8062,7 +8062,7 @@ adminStatsRouter.get('/posts', async (req, res) => {
 adminStatsRouter.delete('/posts/:id', async (req, res) => {
   try {
     await db.remove('posts', req.params.id);
-    res.json({ message: 'G�nderi silindi.' });
+    res.json({ message: 'Gönderi silindi.' });
   } catch (e) { res.status(500).json({ message: e.message }); }
 });
 
@@ -8140,7 +8140,7 @@ adminStatsRouter.get('/countries', async (_req, res) => {
   try {
     const cities = await db.query('cities', { limit: 100 });
     // Group by a pseudo-country (Turkey)
-    res.json({ data: [{ id: 'TR', name: 'T�rkiye', cities: cities.map(toCamel) }] });
+    res.json({ data: [{ id: 'TR', name: 'Türkiye', cities: cities.map(toCamel) }] });
   } catch (e) { res.status(500).json({ message: e.message }); }
 });
 
@@ -8171,7 +8171,7 @@ adminStatsRouter.get('/bot-tasks', async (_req, res) => {
 adminStatsRouter.post('/bot-tasks/:id/execute', async (req, res) => {
   try {
     const updated = await db.update('bot_tasks', req.params.id, { status: 'EXECUTED' }).catch(() => null);
-    res.json({ data: updated ? toCamel(updated) : null, message: 'G�rev y�r�t�ld�.' });
+    res.json({ data: updated ? toCamel(updated) : null, message: 'Görev yürütüldü.' });
   } catch (e) { res.status(500).json({ message: e.message }); }
 });
 
@@ -8180,7 +8180,7 @@ adminStatsRouter.delete('/bot-tasks', async (_req, res) => {
     // Bulk delete all completed bot tasks
     const tasks = await db.query('bot_tasks', { filter: { status: 'EXECUTED' }, limit: 200 }).catch(() => []);
     for (const t of tasks) await db.remove('bot_tasks', t.id).catch(() => {});
-    res.json({ message: `${tasks.length} g�rev silindi.` });
+    res.json({ message: `${tasks.length} görev silindi.` });
   } catch (e) { res.json({ message: 'Temizlendi.' }); }
 });
 
