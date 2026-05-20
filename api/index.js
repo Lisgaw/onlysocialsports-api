@@ -6818,7 +6818,7 @@ ecosystemRouter.post('/', async (req, res) => {
           onboarding_done: true, user_type: 'USER',
           city: city.name, city_id: persistCityId, country_code: cc,
           district: null, district_id: null,
-          bio: botAutomation.generateBotBio({ locale, sportName: localizedSportName, cityName: city.name }),
+          bio: botAutomation.generateBotBio({ locale, sportName: localizedSportName, cityName: city.name, botId }),
           ...botPersona.socialLinks,
           sports: [{ id: sport.id, name: sport.name, icon: sport.icon }],
           level: ['BEGINNER', 'INTERMEDIATE', 'ADVANCED'][Math.floor(Math.random() * 3)],
@@ -6872,8 +6872,8 @@ ecosystemRouter.post('/', async (req, res) => {
         listingRows.push({
           id: listingId,
           type: lType,
-          title: botAutomation.generateListingDesc({ name: bot.name, sport: localizedSportName, locale, city: city.name }),
-          description: botAutomation.generateListingDesc({ name: bot.name, sport: localizedSportName, locale, city: city.name }),
+          title: botAutomation.generateListingDesc({ name: bot.name, sport: localizedSportName, locale, city: city.name, botId: bot.id }),
+          description: botAutomation.generateListingDesc({ name: bot.name, sport: localizedSportName, locale, city: city.name, botId: bot.id }),
           sport_id: sport.id, sport_name: localizedSportName,
           city_id: persistCityId, city_name: city.name,
           district_id: null, district_name: null,
@@ -7058,10 +7058,10 @@ ecosystemRouter.post('/repair-content', async (req, res) => {
         locale,
         sportName: localizedSportName,
         cityName: bot.city || '',
+        botId: bot.id,
       });
 
       const needsBioRepair = force
-        || !maybeString(bot.bio, 400)
         || hasBotTextEncodingIssue(bot.bio)
         || hasEnglishFallbackForLocale(bot.bio, locale);
 
@@ -7099,12 +7099,14 @@ ecosystemRouter.post('/repair-content', async (req, res) => {
           sport: localizedSportName,
           locale,
           city: cityName,
+          botId: bot.id,
         });
         const desiredDescription = botAutomation.generateListingDesc({
           name: bot.name,
           sport: localizedSportName,
           locale,
           city: cityName,
+          botId: bot.id,
         });
 
         const needsListingRepair = force
@@ -7160,6 +7162,7 @@ ecosystemRouter.post('/repair-content', async (req, res) => {
               sportName: localizedSportName,
               cityName: post.city_name || bot.city || '',
               botName: bot.name,
+              botId: bot.id,
             })
           : {
               kind: 'SPORT',
@@ -7169,6 +7172,7 @@ ecosystemRouter.post('/repair-content', async (req, res) => {
                 sportName: localizedSportName,
                 cityName: post.city_name || bot.city || '',
                 botName: bot.name,
+                botId: bot.id,
               }),
             };
 
@@ -7370,7 +7374,7 @@ async function runEcosystemTick(eco) {
           onboarding_done: true, user_type: 'USER',
           city: eco.city_name, city_id: persistEcoCityId, country_code: eco.country_code,
           district: null, district_id: null,
-          bio: botAutomationFill.generateBotBio({ locale, sportName: localizedSportName, cityName: eco.city_name }),
+          bio: botAutomationFill.generateBotBio({ locale, sportName: localizedSportName, cityName: eco.city_name, botId }),
           ...botPersona.socialLinks,
           sports: [{ id: sport.id, name: sport.name, icon: sport.icon }],
           level: ['BEGINNER','INTERMEDIATE','ADVANCED'][Math.floor(Math.random()*3)],
@@ -7675,8 +7679,8 @@ async function runEcosystemTick(eco) {
       await db.insert('listings', {
         id: listingId,
         type: lType,
-        title: botAutomation ? botAutomation.generateListingDesc({ name: bot.name, sport: localizedSportName, locale, city: eco.city_name }) : `${bot.name} - ${sport.name}`,
-        description: botAutomation ? botAutomation.generateListingDesc({ name: bot.name, sport: localizedSportName, locale, city: eco.city_name }) : null,
+        title: botAutomation ? botAutomation.generateListingDesc({ name: bot.name, sport: localizedSportName, locale, city: eco.city_name, botId: bot.id }) : `${bot.name} - ${sport.name}`,
+        description: botAutomation ? botAutomation.generateListingDesc({ name: bot.name, sport: localizedSportName, locale, city: eco.city_name, botId: bot.id }) : null,
         sport_id: sport.id, sport_name: localizedSportName,
         city_id: persistEcoCityId, city_name: eco.city_name,
         district_id: null, district_name: null,
@@ -7731,6 +7735,7 @@ async function runEcosystemTick(eco) {
             sportName,
             cityName: bot.city || eco.city_name,
             botName: bot.name,
+            botId: bot.id,
           })
         : {
             kind: 'SPORT',
@@ -7740,6 +7745,7 @@ async function runEcosystemTick(eco) {
               sportName,
               cityName: bot.city || eco.city_name,
               botName: bot.name,
+              botId: bot.id,
             }),
           };
       postRows.push({
