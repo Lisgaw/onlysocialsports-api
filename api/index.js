@@ -7617,7 +7617,7 @@ async function runEcosystemTick(eco) {
         await db.update('ratings', existingRating.id, { score: newScore, match_id: m.id });
       } else {
         const score = 4 + Math.floor(Math.random() * 2); // 4-5
-        const comments = ['Harika partner! ğ���', '�ok keyifli ma�tı!', 'Tekrar oynamak isterim', 'Great game!', 'Super Spiel!', 'Ğ�тĞ�Ğ�чĞ�Ğ�я Ğ�Ğ�рĞ�!'];
+        const comments = ['Harika partner! 🎾', 'Çok keyifli maçtı!', 'Tekrar oynamak isterim', 'Great game!', 'Super Spiel!', 'Отличная игра!'];
         await db.insert('ratings', {
           id: uuid(),
           match_id: m.id,
